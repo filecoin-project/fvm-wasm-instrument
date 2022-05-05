@@ -8,7 +8,7 @@
 //! searching through all paths, which may take exponential time in the size of the function body in
 //! the worst case.
 
-use super::{ConstantCostRules, MeteredBlock, Rules};
+use super::{ConstantCostRules, MeteredBlock, Rules, InstructionCost};
 use parity_wasm::elements::{FuncBody, Instruction};
 use std::collections::BTreeMap as Map;
 
@@ -149,7 +149,11 @@ fn build_control_flow_graph(
 			graph.increment_charged_cost(active_node_id, next_metered_block.cost);
 		}
 
-		let instruction_cost = rules.instruction_cost(instruction).ok_or(())?;
+		let instruction_cost = match rules.instruction_cost(instruction)? {
+			InstructionCost::Fixed(c) => c,
+			_ => panic!("expected fixed costs here"),
+		};
+
 		match instruction {
 			Instruction::Block(_) => {
 				graph.increment_actual_cost(active_node_id, instruction_cost);
@@ -343,7 +347,7 @@ mod tests {
 			for func_body in module.code_section().iter().flat_map(|section| section.bodies()) {
 				let rules = ConstantCostRules::default();
 
-				let metered_blocks = determine_metered_blocks(func_body.code(), &rules).unwrap();
+				let (metered_blocks, _) = determine_metered_blocks(func_body.code(), &rules).unwrap();
 				let success =
 					validate_metering_injections(func_body, &rules, &metered_blocks).unwrap();
 				assert!(success);

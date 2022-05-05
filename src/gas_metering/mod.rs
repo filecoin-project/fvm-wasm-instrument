@@ -9,6 +9,7 @@ mod validation;
 
 use alloc::{vec, vec::Vec};
 use core::{cmp::min, mem, num::NonZeroU64};
+use std::collections::{HashMap, HashSet};
 use parity_wasm::{
 	builder,
 	elements::{
@@ -17,51 +18,28 @@ use parity_wasm::{
 		ValueType,
 	},
 };
+#[cfg(feature = "bulk")]
+use parity_wasm::elements::BulkInstruction;
 
 /// An interface that describes instruction costs.
 pub trait Rules {
 	/// Returns the cost for the passed `instruction`.
 	///
-	/// Returning `None` makes the gas instrumention end with an error. This is meant
-	/// as a way to have a partial rule set where any instruction that is not specifed
-	/// is considered as forbidden.
-	fn instruction_cost(&self, instruction: &Instruction) -> Option<u64>;
-
-	/// Returns the costs for growing the memory using the `memory.grow` instruction.
-	///
-	/// Please note that these costs are in addition to the costs specified by `instruction_cost`
-	/// for the `memory.grow` instruction. Those are meant as dynamic costs which take the
-	/// amount of pages that the memory is grown by into consideration. This is not possible
-	/// using `instruction_cost` because those costs depend on the stack and must be injected as
-	/// code into the function calling `memory.grow`. Therefore returning anything but
-	/// [`MemoryGrowCost::Free`] introduces some overhead to the `memory.grow` instruction.
-	fn memory_grow_cost(&self) -> MemoryGrowCost;
+	/// Returning an error can be used as a way to indicat that an instruction
+	/// is forbidden
+	fn instruction_cost(&self, instruction: &Instruction) -> Result<InstructionCost, ()>;
 }
 
-/// Dynamic costs for memory growth.
+/// Dynamic costs instructions.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub enum MemoryGrowCost {
-	/// Skip per page charge.
-	///
-	/// # Note
-	///
-	/// This makes sense when the amount of pages that a module is allowed to use is limited
-	/// to a rather small number by static validation. In that case it is viable to
-	/// benchmark the costs of `memory.grow` as the worst case (growing to to the maximum
-	/// number of pages).
-	Free,
-	/// Charge the specified amount for each page that the memory is grown by.
-	Linear(NonZeroU64),
-}
+pub enum InstructionCost {
+	/// Charge fixed amount per instruction.
+	Fixed(u64),
 
-impl MemoryGrowCost {
-	/// True iff memory growths code needs to be injected.
-	fn enabled(&self) -> bool {
-		match self {
-			Self::Free => false,
-			Self::Linear(_) => true,
-		}
-	}
+	/// Charge the specified amount of base miligas, plus miligas based on the
+	/// last item on the stack. For memory.grow this is the number of pages.
+	/// For memory.copy this is the number of bytes to copy.
+	Linear(u64, NonZeroU64),
 }
 
 /// A type that implements [`Rules`] so that every instruction costs the same.
@@ -96,12 +74,11 @@ impl Default for ConstantCostRules {
 }
 
 impl Rules for ConstantCostRules {
-	fn instruction_cost(&self, _: &Instruction) -> Option<u64> {
-		Some(self.instruction_cost)
-	}
-
-	fn memory_grow_cost(&self) -> MemoryGrowCost {
-		NonZeroU64::new(self.memory_grow_cost).map_or(MemoryGrowCost::Free, MemoryGrowCost::Linear)
+	fn instruction_cost(&self, i: &Instruction) -> Result<InstructionCost, ()> {
+		match i {
+			Instruction::GrowMemory(_) => Ok(NonZeroU64::new(self.memory_grow_cost).map_or(InstructionCost::Fixed(0), |c|InstructionCost::Linear(0, c))),
+			_ => Ok(InstructionCost::Fixed(self.instruction_cost)),
+		}
 	}
 }
 
@@ -145,7 +122,7 @@ pub fn inject<R: Rules>(
 	module: elements::Module,
 	rules: &R,
 	gas_module_name: &str,
-) -> Result<elements::Module, elements::Module> {
+) -> Result<elements::Module, ()> {
 	// Injecting gas counting external
 
 	let mut mbuilder = builder::from_module(module);
@@ -171,10 +148,10 @@ pub fn inject<R: Rules>(
 	// We'll push the gas counter fuction after all other functions
 	let gas_func = total_func;
 
-	// grow_cnt_func is optional, so we put it after the gas function which always exists
-	let grow_cnt_func = total_func + 1;
+	// dynamic counter funcs come last (note: this gets incremented before it's used)
+	let mut next_dyncnt_func = total_func;
+	let mut dyn_funcs = HashMap::new();
 
-	let mut need_grow_counter = false;
 	let mut error = false;
 
 	// Updating calling addresses (all calls to function index >= `gas_func` should be incremented)
@@ -192,15 +169,23 @@ pub fn inject<R: Rules>(
 						}
 					}
 
-					if inject_counter(func_body.code_mut(), rules, gas_func).is_err() {
-						error = true;
-						break
+					match inject_counter(func_body.code_mut(), rules, gas_func) {
+						Ok(dyn_instrs) => {
+							// create indexes for instructions with dynamic gas charges
+							for instr in dyn_instrs {
+								dyn_funcs.entry(instr).or_insert_with(||{
+									next_dyncnt_func+=1;
+									next_dyncnt_func
+								});
+							}
+						},
+						Err(_) => {
+							error = true;
+							break
+						}
 					}
-					if rules.memory_grow_cost().enabled() &&
-						inject_grow_counter(func_body.code_mut(), grow_cnt_func) > 0
-					{
-						need_grow_counter = true;
-					}
+
+					inject_dynamic_counters(func_body.code_mut(), &mut dyn_funcs);
 				},
 
 			// adjust global exports
@@ -254,13 +239,13 @@ pub fn inject<R: Rules>(
 	}
 
 	if error {
-		return Err(module)
+		return Err(())
 	}
 
 	module = add_gas_counter(module, gas_global);
 
-	if need_grow_counter {
-		Ok(add_grow_counter(module, rules, gas_func))
+	if !dyn_funcs.is_empty() {
+		add_dynamic_counters(module, rules, gas_func, &dyn_funcs)
 	} else {
 		Ok(module)
 	}
@@ -461,55 +446,98 @@ impl Counter {
 	}
 }
 
-fn inject_grow_counter(instructions: &mut elements::Instructions, grow_counter_func: u32) -> usize {
+fn inject_dynamic_counters(instructions: &mut elements::Instructions, dyn_funcs: &mut HashMap<Instruction, u32>) -> usize {
 	use parity_wasm::elements::Instruction::*;
 	let mut counter = 0;
 	for instruction in instructions.elements_mut() {
-		if let GrowMemory(_) = *instruction {
-			*instruction = Call(grow_counter_func);
+		// TODO CHECK FOR CONST!!!!
+
+		if let Some(func_idx ) = dyn_funcs.get(instruction) {
+			*instruction = Call(*func_idx);
 			counter += 1;
 		}
 	}
 	counter
 }
 
-fn add_grow_counter<R: Rules>(
+fn add_dynamic_counters<R: Rules>(
 	module: elements::Module,
 	rules: &R,
 	gas_func: u32,
-) -> elements::Module {
+	dyn_funcs: &HashMap<Instruction, u32>,
+) -> Result<elements::Module, ()> {
 	use parity_wasm::elements::Instruction::*;
 
-	let cost = match rules.memory_grow_cost() {
-		MemoryGrowCost::Free => return module,
-		MemoryGrowCost::Linear(val) => val.get(),
-	};
+	let mut funcs_sorted: Vec<(&Instruction, &u32)> = dyn_funcs.into_iter().collect();
+	funcs_sorted.sort_by(|(_, lk), (_, rk)| lk.cmp(rk));
 
 	let mut b = builder::from_module(module);
-	b.push_function(
-		builder::function()
-			.signature()
-			.with_param(ValueType::I32)
-			.with_result(ValueType::I32)
-			.build()
-			.body()
-			.with_instructions(elements::Instructions::new(vec![
-				GetLocal(0),
-				GetLocal(0),
-				I64ExtendUI32,
-				I64Const(cost as i64),
-				I64Mul,
-				// todo: there should be strong guarantee that it does not return anything on
-				// stack?
-				Call(gas_func),
-				GrowMemory(0),
-				End,
-			]))
-			.build()
-			.build(),
-	);
 
-	b.build()
+	for (instr, _) in funcs_sorted {
+		let cost = match rules.instruction_cost(instr)? {
+			InstructionCost::Linear(_, val) => val.get(),
+			_ => return Err(()) // "dynamic instruction cost wasn't linear" todo anyhow errs
+		};
+
+		let (params, rets) = instruction_signature(instr)?;
+
+		let mut counter_body = Vec::new();
+
+		// first get all params back onto the stack
+		for (i, _) in params.into_iter().enumerate() {
+			counter_body.push(GetGlobal(i as u32))
+		}
+
+		// get the dynamic param back onto the stack
+		counter_body.push(GetLocal(params.len() as u32-1));
+
+		// cast the dynamic param if needed
+		match params.last().ok_or(())? { // "dynamic functions must have params" todo anyhow errs
+			ValueType::I32 => counter_body.push(I64ExtendUI32),
+			_ => return Err(()), // "unsupported dynamic param type" todo anyhow
+		}
+
+		// calculate and charge gas, then call the original instruction!
+		counter_body.append(&mut vec![
+			I64Const(cost as i64),
+			I64Mul,
+			Call(gas_func),
+
+			instr.clone(),
+
+			End,
+		]);
+
+		b.push_function(
+			builder::function().signature()
+				.with_params(params.to_vec())
+				.with_results(rets.to_vec())
+				.build()
+				.body()
+				.with_instructions(elements::Instructions::new(counter_body))
+				.build()
+				.build(),
+		);
+	}
+
+	Ok(b.build())
+}
+
+fn instruction_signature(instr: &Instruction) -> Result<(&'static[ValueType], &'static[ValueType]), ()> {
+	use parity_wasm::elements::Instruction::*;
+
+	match instr {
+		GrowMemory(_) => Ok((&[ValueType::I32], &[ValueType::I32])),
+
+		#[cfg(feature = "bulk")]
+		Bulk(BulkInstruction::MemoryInit(_)) |
+		Bulk(BulkInstruction::MemoryCopy) |
+		Bulk(BulkInstruction::MemoryFill) |
+		Bulk(BulkInstruction::TableInit(_)) |
+		Bulk(BulkInstruction::TableCopy) => Ok((&[ValueType::I32, ValueType::I32, ValueType::I32], ())),
+
+		_ => Err(()) // "instruction not supported" todo anyhow
+	}
 }
 
 fn add_gas_counter(module: elements::Module, gas_global: u32) -> elements::Module {
@@ -545,7 +573,7 @@ fn add_gas_counter(module: elements::Module, gas_global: u32) -> elements::Modul
 fn determine_metered_blocks<R: Rules>(
 	instructions: &elements::Instructions,
 	rules: &R,
-) -> Result<Vec<MeteredBlock>, ()> {
+) -> Result<(Vec<MeteredBlock>, HashSet<Instruction>), ()> {
 	use parity_wasm::elements::Instruction::*;
 
 	let mut counter = Counter::new();
@@ -553,9 +581,25 @@ fn determine_metered_blocks<R: Rules>(
 	// Begin an implicit function (i.e. `func...end`) block.
 	counter.begin_control_block(0, false);
 
+	let mut last_const: Option<i32> = None;
+	let mut liniear_cost_instructions = HashSet::new();
+
 	for cursor in 0..instructions.elements().len() {
 		let instruction = &instructions.elements()[cursor];
-		let instruction_cost = rules.instruction_cost(instruction).ok_or(())?;
+		let instruction_cost = match rules.instruction_cost(instruction)? {
+			InstructionCost::Fixed(c) => c,
+			InstructionCost::Linear(base, cost_per) => {
+				if let Some(stack_top) = last_const {
+					base + (stack_top as u64 * cost_per.get())
+				} else {
+					liniear_cost_instructions.insert(instruction.clone());
+					// linear part will get charged at runtime (this instruction will get replaced
+					// with a call to gas-charging func)
+					base
+				}
+			}
+		};
+
 		match instruction {
 			Block(_) => {
 				counter.increment(instruction_cost)?;
@@ -605,24 +649,31 @@ fn determine_metered_blocks<R: Rules>(
 				counter.increment(instruction_cost)?;
 				counter.branch(cursor, &[0])?;
 			},
+			I32Const(v) => {
+				last_const = Some(*v);
+				counter.increment(instruction_cost)?;
+				continue;
+			},
 			_ => {
 				// An ordinal non control flow instruction increments the cost of the current block.
 				counter.increment(instruction_cost)?;
 			},
 		}
+
+		last_const = None;
 	}
 
 	counter.finalized_blocks.sort_unstable_by_key(|block| block.start_pos);
-	Ok(counter.finalized_blocks)
+	Ok((counter.finalized_blocks, liniear_cost_instructions))
 }
 
 fn inject_counter<R: Rules>(
 	instructions: &mut elements::Instructions,
 	rules: &R,
 	gas_func: u32,
-) -> Result<(), ()> {
-	let blocks = determine_metered_blocks(instructions, rules)?;
-	insert_metering_calls(instructions, blocks, gas_func)
+) -> Result<HashSet<Instruction>, ()> {
+	let (blocks, dynamic_instrs) = determine_metered_blocks(instructions, rules)?;
+	insert_metering_calls(instructions, blocks, gas_func).map(|_|dynamic_instrs)
 }
 
 // Then insert metering calls into a sequence of instructions given the block locations and costs.

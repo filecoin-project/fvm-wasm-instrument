@@ -70,6 +70,7 @@ pub fn generate_thunks(
 			*func_idx,
 			thunk.callee_stack_cost as i32,
 			ctx.stack_height_global_idx(),
+			ctx.max_height_global_idx(),
 			ctx.stack_limit()
 		);
 		// Thunk body consist of:

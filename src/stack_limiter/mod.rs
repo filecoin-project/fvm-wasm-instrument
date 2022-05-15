@@ -6,10 +6,11 @@ use parity_wasm::{
 	builder,
 	elements::{self, Instruction, Instructions, Type},
 };
+use parity_wasm::elements::ValueType;
 
 /// Macro to generate preamble and postamble.
 macro_rules! instrument_call {
-	($callee_idx: expr, $callee_stack_cost: expr, $stack_height_global_idx: expr, $stack_limit: expr) => {{
+	($callee_idx: expr, $callee_stack_cost: expr, $stack_height_global_idx: expr, $max_height_global_idx: expr, $stack_limit: expr) => {{
 		use $crate::parity_wasm::elements::Instruction::*;
 		[
 			// stack_height += stack_cost(F)
@@ -17,6 +18,14 @@ macro_rules! instrument_call {
 			I32Const($callee_stack_cost),
 			I32Add,
 			SetGlobal($stack_height_global_idx),
+			// if stack_counter > max_stack: max_stack = stack_counter
+			GetGlobal($stack_height_global_idx),
+			GetGlobal($max_height_global_idx),
+			I32GtU,
+			If(elements::BlockType::NoResult),
+			GetGlobal($stack_height_global_idx),
+			SetGlobal($max_height_global_idx),
+			End,
 			// if stack_counter > LIMIT: unreachable
 			GetGlobal($stack_height_global_idx),
 			I32Const($stack_limit as i32),
@@ -40,6 +49,7 @@ mod thunk;
 
 pub struct Context {
 	stack_height_global_idx: u32,
+	max_height_global_idx: u32,
 	func_stack_costs: Vec<u32>,
 	stack_limit: u32,
 }
@@ -48,6 +58,10 @@ impl Context {
 	/// Returns index in a global index space of a stack_height global variable.
 	fn stack_height_global_idx(&self) -> u32 {
 		self.stack_height_global_idx
+	}
+
+	fn max_height_global_idx(&self) -> u32 {
+		self.max_height_global_idx
 	}
 
 	/// Returns `stack_cost` for `func_idx`.
@@ -115,8 +129,11 @@ pub fn inject(
 	mut module: elements::Module,
 	stack_limit: u32,
 ) -> Result<elements::Module, &'static str> {
+	let mh = generate_max_stack_height_global(&mut module);
+
 	let mut ctx = Context {
-		stack_height_global_idx: generate_stack_height_global(&mut module),
+		stack_height_global_idx: generate_stack_height_global(mh+1, &mut module),
+		max_height_global_idx: mh,
 		func_stack_costs: compute_stack_costs(&module)?,
 		stack_limit,
 	};
@@ -128,7 +145,7 @@ pub fn inject(
 }
 
 /// Generate a new global that will be used for tracking current stack height.
-fn generate_stack_height_global(module: &mut elements::Module) -> u32 {
+fn generate_stack_height_global(imports: u32, module: &mut elements::Module) -> u32 {
 	let global_entry = builder::global()
 		.value_type()
 		.i32()
@@ -140,7 +157,7 @@ fn generate_stack_height_global(module: &mut elements::Module) -> u32 {
 	for section in module.sections_mut() {
 		if let elements::Section::Global(gs) = section {
 			gs.entries_mut().push(global_entry);
-			return (gs.entries().len() as u32) - 1
+			return imports + (gs.entries().len() as u32) - 1
 		}
 	}
 
@@ -148,7 +165,54 @@ fn generate_stack_height_global(module: &mut elements::Module) -> u32 {
 	module
 		.sections_mut()
 		.push(elements::Section::Global(elements::GlobalSection::with_entries(vec![global_entry])));
-	0
+	imports
+}
+
+/// Generate a new global mutable extern that will be used for tracking current stack height.
+fn generate_max_stack_height_global(module: &mut elements::Module) -> u32 {
+	let mut mbuilder = builder::from_module(module.clone());
+	mbuilder.push_import(
+		builder::import()
+			.module("stack")
+			.field("max")
+			.external()
+			.global(ValueType::I32, true)
+			.build(),
+	);
+	*module = mbuilder.build();
+
+	let max_stack_global = module.import_count(elements::ImportCountType::Global) as u32 - 1;
+
+	for section in module.sections_mut() {
+		match section {
+			elements::Section::Code(code_section) =>
+				for func_body in code_section.bodies_mut() {
+					for instruction in func_body.code_mut().elements_mut().iter_mut() {
+						match instruction {
+							Instruction::GetGlobal(global_index) |
+							Instruction::SetGlobal(global_index)
+							if *global_index >= max_stack_global =>
+								*global_index += 1,
+							_ => {},
+						}
+					}
+				},
+
+			// adjust global exports
+			elements::Section::Export(export_section) => {
+				for export in export_section.entries_mut() {
+					if let elements::Internal::Global(global_index) = export.internal_mut() {
+						if *global_index >= max_stack_global {
+							*global_index += 1;
+						}
+					}
+				}
+			},
+			_ => {},
+		}
+	}
+
+	max_stack_global
 }
 
 /// Calculate stack costs for all functions.
@@ -271,7 +335,7 @@ fn instrument_function(ctx: &mut Context, func: &mut Instructions) -> Result<(),
 		.collect();
 
 	// The `instrumented_call!` contains the call itself. This is why we need to subtract one.
-	let len = func.elements().len() + calls.len() * (instrument_call!(0, 0, 0, 0).len() - 1);
+	let len = func.elements().len() + calls.len() * (instrument_call!(0, 0, 0, 0, 0).len() - 1);
 	let original_instrs = mem::replace(func.elements_mut(), Vec::with_capacity(len));
 	let new_instrs = func.elements_mut();
 
@@ -284,6 +348,7 @@ fn instrument_function(ctx: &mut Context, func: &mut Instructions) -> Result<(),
 					call.callee,
 					call.cost as i32,
 					ctx.stack_height_global_idx(),
+					ctx.max_height_global_idx(),
 					ctx.stack_limit()
 				);
 				new_instrs.extend_from_slice(&new_seq);

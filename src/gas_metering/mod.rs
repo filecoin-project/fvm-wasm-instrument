@@ -213,8 +213,8 @@ pub fn inject<R: Rules>(
 					}
 				}
 			},
-
-			elements::Section::Import(export_section) =>
+//todo
+			/*elements::Section::Import(export_section) =>
 				for export in export_section.entries() {
 					if let elements::External::Global(_) = export.external() {
 						if export.module() != gas_module_name && export.field() != GAS_COUNTER_NAME
@@ -224,7 +224,7 @@ pub fn inject<R: Rules>(
 						}
 					}
 				},
-
+*/
 			elements::Section::Element(elements_section) => {
 				for segment in elements_section.entries_mut() {
 					if let Some(inst) = segment.offset() {

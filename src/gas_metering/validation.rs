@@ -9,8 +9,9 @@
 //! the worst case.
 
 use super::{ConstantCostRules, MeteredBlock, Rules};
-use parity_wasm::elements::{FuncBody, Instruction};
+use anyhow::{anyhow, Result};
 use std::collections::BTreeMap as Map;
+use wasmparser::Operator;
 
 /// An ID for a node in a ControlFlowGraph.
 type NodeId = usize;
@@ -121,10 +122,12 @@ impl ControlFrame {
 ///
 /// This assumes that the function body has been validated already, otherwise this may panic.
 fn build_control_flow_graph(
-	body: &FuncBody,
+	body: &wasmparser::FunctionBody,
 	rules: &impl Rules,
 	blocks: &[MeteredBlock],
-) -> Result<ControlFlowGraph, ()> {
+) -> Result<ControlFlowGraph> {
+	use wasmparser::Operator::*;
+
 	let mut graph = ControlFlowGraph::new();
 
 	let entry_node_id = graph.add_node();
@@ -134,7 +137,11 @@ fn build_control_flow_graph(
 
 	let mut stack = vec![ControlFrame::new(entry_node_id, terminal_node_id, false)];
 	let mut metered_blocks_iter = blocks.iter().peekable();
-	for (cursor, instruction) in body.code().elements().iter().enumerate() {
+	let operators = body
+		.get_operators_reader()?
+		.into_iter()
+		.collect::<wasmparser::Result<Vec<Operator>>>()?;
+	for (cursor, instruction) in operators.iter().enumerate() {
 		let active_node_id = stack
 			.last()
 			.expect("module is valid by pre-condition; control stack must not be empty; qed")
@@ -149,15 +156,17 @@ fn build_control_flow_graph(
 			graph.increment_charged_cost(active_node_id, next_metered_block.cost);
 		}
 
-		let instruction_cost = rules.instruction_cost(instruction).ok_or(())?;
+		let instruction_cost = rules
+			.instruction_cost(instruction)
+			.ok_or_else(|| anyhow!("gas rule for instruction {:?} not found", &instruction))?;
 		match instruction {
-			Instruction::Block(_) => {
+			Block { ty: _ } => {
 				graph.increment_actual_cost(active_node_id, instruction_cost);
 
 				let exit_node_id = graph.add_node();
 				stack.push(ControlFrame::new(active_node_id, exit_node_id, false));
 			},
-			Instruction::If(_) => {
+			If { ty: _ } => {
 				graph.increment_actual_cost(active_node_id, instruction_cost);
 
 				let then_node_id = graph.add_node();
@@ -167,7 +176,7 @@ fn build_control_flow_graph(
 				graph.new_forward_edge(active_node_id, then_node_id);
 				graph.set_first_instr_pos(then_node_id, cursor + 1);
 			},
-			Instruction::Loop(_) => {
+			Loop { ty: _ } => {
 				graph.increment_actual_cost(active_node_id, instruction_cost);
 
 				let loop_node_id = graph.add_node();
@@ -177,7 +186,7 @@ fn build_control_flow_graph(
 				graph.new_forward_edge(active_node_id, loop_node_id);
 				graph.set_first_instr_pos(loop_node_id, cursor + 1);
 			},
-			Instruction::Else => {
+			Else => {
 				let active_frame_idx = stack.len() - 1;
 				let prev_frame_idx = stack.len() - 2;
 
@@ -188,7 +197,7 @@ fn build_control_flow_graph(
 				graph.new_forward_edge(prev_node_id, else_node_id);
 				graph.set_first_instr_pos(else_node_id, cursor + 1);
 			},
-			Instruction::End => {
+			End => {
 				let closing_frame = stack.pop()
 					.expect("module is valid by pre-condition; ends correspond to control stack frames; qed");
 
@@ -199,7 +208,7 @@ fn build_control_flow_graph(
 					active_frame.active_node = closing_frame.exit_node;
 				}
 			},
-			Instruction::Br(label) => {
+			Br { relative_depth: label } => {
 				graph.increment_actual_cost(active_node_id, instruction_cost);
 
 				let active_frame_idx = stack.len() - 1;
@@ -211,7 +220,7 @@ fn build_control_flow_graph(
 				stack[active_frame_idx].active_node = new_node_id;
 				graph.set_first_instr_pos(new_node_id, cursor + 1);
 			},
-			Instruction::BrIf(label) => {
+			BrIf { relative_depth: label } => {
 				graph.increment_actual_cost(active_node_id, instruction_cost);
 
 				let active_frame_idx = stack.len() - 1;
@@ -223,12 +232,14 @@ fn build_control_flow_graph(
 				graph.new_forward_edge(active_node_id, new_node_id);
 				graph.set_first_instr_pos(new_node_id, cursor + 1);
 			},
-			Instruction::BrTable(br_table_data) => {
+			BrTable { table: br_table_data } => {
 				graph.increment_actual_cost(active_node_id, instruction_cost);
 
 				let active_frame_idx = stack.len() - 1;
-				for &label in [br_table_data.default].iter().chain(br_table_data.table.iter()) {
-					let target_frame_idx = active_frame_idx - (label as usize);
+
+				let r = br_table_data.targets().collect::<wasmparser::Result<Vec<u32>>>()?;
+				for label in [br_table_data.default()].iter().chain(r.iter()) {
+					let target_frame_idx = active_frame_idx - (*label as usize);
 					graph.new_edge(active_node_id, &stack[target_frame_idx]);
 				}
 
@@ -236,7 +247,7 @@ fn build_control_flow_graph(
 				stack[active_frame_idx].active_node = new_node_id;
 				graph.set_first_instr_pos(new_node_id, cursor + 1);
 			},
-			Instruction::Return => {
+			Return => {
 				graph.increment_actual_cost(active_node_id, instruction_cost);
 
 				graph.new_forward_edge(active_node_id, terminal_node_id);
@@ -315,20 +326,20 @@ fn validate_graph_gas_costs(graph: &ControlFlowGraph) -> bool {
 ///
 /// This assumes that the function body has been validated already, otherwise this may panic.
 fn validate_metering_injections(
-	body: &FuncBody,
+	body: &wasmparser::FunctionBody,
 	rules: &impl Rules,
 	blocks: &[MeteredBlock],
-) -> Result<bool, ()> {
+) -> Result<bool> {
 	let graph = build_control_flow_graph(body, rules, blocks)?;
 	Ok(validate_graph_gas_costs(&graph))
 }
 
 mod tests {
 	use super::{super::determine_metered_blocks, *};
-
+	use wasmparser::Payload::CodeSectionStart;
 	use binaryen::tools::translate_to_fuzz_mvp;
-	use parity_wasm::elements;
 	use rand::{thread_rng, RngCore};
+	use wasmparser::{CodeSectionReader, FunctionBody};
 
 	#[test]
 	fn test_build_control_flow_graph() {
@@ -337,16 +348,22 @@ mod tests {
 			thread_rng().fill_bytes(&mut rand_input);
 
 			let module_bytes = translate_to_fuzz_mvp(&rand_input).write();
-			let module: elements::Module = elements::deserialize_buffer(&module_bytes)
-				.expect("failed to parse Wasm blob generated by translate_to_fuzz");
+			let payload = wasmparser::Parser::new(0)
+				.parse_all(&module_bytes)
+				.map(|v| v.unwrap())
+				.find(|payload| matches!(payload, CodeSectionStart { .. }))
+				.unwrap();
 
-			for func_body in module.code_section().iter().flat_map(|section| section.bodies()) {
-				let rules = ConstantCostRules::default();
-
-				let metered_blocks = determine_metered_blocks(func_body.code(), &rules).unwrap();
-				let success =
-					validate_metering_injections(func_body, &rules, &metered_blocks).unwrap();
-				assert!(success);
+			if let CodeSectionStart { range, .. } = payload {
+				let reader = CodeSectionReader::new(&module_bytes[range], 0).unwrap();
+				let bodies = reader.into_iter().collect::<wasmparser::Result<Vec<FunctionBody>>>().unwrap();
+				for func_body in bodies {
+					let rules = ConstantCostRules::default();
+					let metered_blocks = determine_metered_blocks(&func_body, &rules).unwrap();
+					let success =
+						validate_metering_injections(&func_body, &rules, &metered_blocks).unwrap();
+					assert!(success);
+				}
 			}
 		}
 	}

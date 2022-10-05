@@ -1,31 +1,43 @@
 (module
   (type (;0;) (func (result i32)))
-  (type (;1;) (func (param i32)))
-  (import "env" "gas" (func $fibonacci_with_break (type 1)))
-  (func (;1;) (type 0) (result i32)
-    (local i32 i32)
-    i32.const 13
-    call $fibonacci_with_break
-    block  ;; label = @1
+  (type (;1;) (func (param i64)))
+  (import "env" "gas_couner" (global (;0;) (mut i64)))
+  (func $fibonacci_with_break (;0;) (type 0) (result i32)
+    (local $x i32) (local $y i32)
+    i64.const 13
+    call 1
+    block $unrolled_loop  ;; label = @1
       i32.const 0
-      local.set 0
+      local.set $x
       i32.const 1
-      local.set 1
-      local.get 0
-      local.get 1
-      local.tee 0
+      local.set $y
+      local.get $x
+      local.get $y
+      local.tee $x
       i32.add
-      local.set 1
+      local.set $y
       i32.const 1
       br_if 0 (;@1;)
-      i32.const 5
-      call $fibonacci_with_break
-      local.get 0
-      local.get 1
-      local.tee 0
+      i64.const 5
+      call 1
+      local.get $x
+      local.get $y
+      local.tee $x
       i32.add
-      local.set 1
+      local.set $y
     end
-    local.get 1
+    local.get $y
+  )
+  (func (;1;) (type 1) (param i64)
+    global.get 0
+    local.get 0
+    i64.sub
+    global.set 0
+    global.get 0
+    i64.const 0
+    i64.lt_s
+    if  ;; label = @1
+      unreachable
+    end
   )
 )

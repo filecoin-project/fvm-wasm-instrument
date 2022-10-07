@@ -14,7 +14,7 @@ use wasm_encoder::{
 };
 use wasmparser::{
 	CodeSectionReader, ElementItem, ElementKind, ElementSectionReader, ExportSectionReader,
-	ExternalKind, FunctionBody, FunctionSectionReader, Type,
+	ExternalKind, FunctionSectionReader, Type,
 };
 
 struct Thunk {
@@ -58,7 +58,7 @@ pub fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Result<()>
 							ElementItem::Func(func_idx) => Ok(func_idx),
 							ElementItem::Expr(_) => Err(anyhow!("never exec here")),
 						},
-						Err(_) => Err(anyhow!("read elementitem error")),
+						Err(_) => Err(anyhow!("read element item error")),
 					})
 					.collect::<anyhow::Result<Vec<u32>>>()?;
 				table_func_indices.extend_from_slice(segment_func_indices);
@@ -102,18 +102,17 @@ pub fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Result<()>
 		.get(&SectionId::Code.into())
 		.ok_or_else(|| anyhow!("no function body"))?
 		.data;
-	let func_bodys = CodeSectionReader::new(func_body_sec_data, 0)?
-		.into_iter()
-		.collect::<wasmparser::Result<Vec<FunctionBody>>>()?;
-	for func_body in func_bodys {
-		DefaultTranslator.translate_code(func_body, &mut func_body_sec_builder)?;
+
+	let code_sec_reader = CodeSectionReader::new(func_body_sec_data, 0)?;
+	for func_body in code_sec_reader {
+		DefaultTranslator.translate_code(func_body?, &mut func_body_sec_builder)?;
 	}
 
 	let mut func_sec_builder = FunctionSection::new();
 	let func_sec_data = &module
 		.raw_sections
 		.get(&SectionId::Function.into())
-		.ok_or_else(|| anyhow!("no function"))?
+		.ok_or_else(|| anyhow!("no function section"))? //todo allow empty function file?
 		.data;
 	for func_body in FunctionSectionReader::new(func_sec_data, 0)? {
 		func_sec_builder.function(func_body?);
@@ -125,7 +124,7 @@ pub fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Result<()>
 		//  - argument pushing
 		//  - instrumented call
 		//  - end
-		let mut thunk_body = wasm_encoder::Function::new(vec![]);
+		let mut thunk_body = wasm_encoder::Function::new(None);
 
 		for (arg_idx, _) in thunk.signature.params().iter().enumerate() {
 			thunk_body.instruction(&wasm_encoder::Instruction::LocalGet(arg_idx as u32));
@@ -162,7 +161,7 @@ pub fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Result<()>
 		if let ExternalKind::Func = export.kind {
 			if let Some(thunk) = replacement_map.get(&function_idx) {
 				function_idx =
-					thunk.idx.expect("At this point an index must be assigned to each thunk");
+					thunk.idx.expect("at this point an index must be assigned to each thunk");
 			}
 		}
 		export_sec_builder.export(
@@ -185,7 +184,7 @@ pub fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Result<()>
 						if let Some(thunk) = replacement_map.get(&func_idx) {
 							new_func_idx = thunk
 								.idx
-								.expect("At this point an index must be assigned to each thunk");
+								.expect("at this point an index must be assigned to each thunk");
 						}
 					},
 					_ => return Err(anyhow!("element must be func here")),
@@ -228,7 +227,7 @@ pub fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Result<()>
 		let mut new_func_idx = start_idx;
 		if let Some(thunk) = replacement_map.get(&start_idx) {
 			new_func_idx =
-				thunk.idx.expect("At this point an index must be assigned to each thunk");
+				thunk.idx.expect("at this point an index must be assigned to each thunk");
 		}
 
 		module.replace_section(

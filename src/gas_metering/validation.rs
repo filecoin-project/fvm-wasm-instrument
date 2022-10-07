@@ -336,10 +336,9 @@ fn validate_metering_injections(
 
 mod tests {
 	use super::{super::determine_metered_blocks, *};
-	use wasmparser::Payload::CodeSectionStart;
 	use binaryen::tools::translate_to_fuzz_mvp;
 	use rand::{thread_rng, RngCore};
-	use wasmparser::{CodeSectionReader, FunctionBody};
+	use wasmparser::{CodeSectionReader, FunctionBody, Payload::CodeSectionStart};
 
 	#[test]
 	fn test_build_control_flow_graph() {
@@ -356,7 +355,8 @@ mod tests {
 
 			if let CodeSectionStart { range, .. } = payload {
 				let reader = CodeSectionReader::new(&module_bytes[range], 0).unwrap();
-				let bodies = reader.into_iter().collect::<wasmparser::Result<Vec<FunctionBody>>>().unwrap();
+				let bodies =
+					reader.into_iter().collect::<wasmparser::Result<Vec<FunctionBody>>>().unwrap();
 				for func_body in bodies {
 					let rules = ConstantCostRules::default();
 					let metered_blocks = determine_metered_blocks(&func_body, &rules).unwrap();

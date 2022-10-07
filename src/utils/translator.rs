@@ -216,6 +216,7 @@ pub fn export_kind(_: &dyn Translator, kind: ExternalKind) -> Result<ExportKind>
 	}
 }
 
+#[allow(unused)]
 pub fn export(
 	t: &dyn Translator,
 	e: &wasmparser::Export<'_>,

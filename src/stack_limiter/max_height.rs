@@ -138,7 +138,7 @@ pub fn compute(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
 		&module
 			.raw_sections
 			.get(&SectionId::Code.into())
-			.ok_or_else(|| anyhow!("No code section"))?
+			.ok_or_else(|| anyhow!("no code section"))?
 			.data,
 		0,
 	)?;
@@ -148,8 +148,8 @@ pub fn compute(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
 	let body = code_section
 		.into_iter()
 		.nth(func_idx as usize)
-		.ok_or_else(|| anyhow!("Function body for the index isn't found"))??;
-	let body_reader = body.get_operators_reader()?;
+		.ok_or_else(|| anyhow!("function body for the index isn't found"))??;
+	let mut body_reader = body.get_operators_reader()?;
 	let mut stack = Stack::new();
 	let mut max_height: u32 = 0;
 
@@ -163,14 +163,14 @@ pub fn compute(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
 		start_height: 0,
 	});
 
-	for opcode_r in body_reader {
+	while !body_reader.eof() {
+		let opcode = body_reader.read()?;
 		// If current value stack is higher than maximal height observed so far,
 		// save the new height.
 		// However, we don't increase maximal value in unreachable code.
 		if stack.height() > max_height && !stack.frame(0)?.is_polymorphic {
 			max_height = stack.height();
 		}
-		let opcode = opcode_r?; //todo how to optimize this?
 		match opcode {
 				Nop => {},
 				Block{ty} | Loop{ty} | If{ty} => {
@@ -226,7 +226,7 @@ pub fn compute(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
 					for target in table.targets() {
 						let arity = stack.frame(target?)?.branch_arity;
 						if arity != arity_of_default {
-							return Err(anyhow!("Arity of all jump-targets must be equal"))
+							return Err(anyhow!("arity of all jump-targets must be equal"))
 						}
 					}
 

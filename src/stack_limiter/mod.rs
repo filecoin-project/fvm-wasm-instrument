@@ -178,7 +178,7 @@ fn compute_stack_cost(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
 	let func_imports = module.num_imported_functions();
 	let defined_func_idx = func_idx
 		.checked_sub(func_imports)
-		.ok_or_else(|| anyhow!("This should be a index of a defined function"))?;
+		.ok_or_else(|| anyhow!("this should be a index of a defined function"))?;
 
 	let code_section_reader = CodeSectionReader::new(
 		&module
@@ -193,7 +193,7 @@ fn compute_stack_cost(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
 		.into_iter()
 		.collect::<wasmparser::Result<Vec<FunctionBody>>>()?
 		.get(defined_func_idx as usize)
-		.ok_or_else(|| anyhow!("Function body is out of bounds"))?
+		.ok_or_else(|| anyhow!("function body is out of bounds"))?
 		.get_locals_reader()?;
 
 	let locals_count: u32 = local_reader.get_count();
@@ -201,7 +201,7 @@ fn compute_stack_cost(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
 
 	locals_count
 		.checked_add(max_stack_height)
-		.ok_or_else(|| anyhow!("Overflow in adding locals_count and max_stack_height"))
+		.ok_or_else(|| anyhow!("overflow in adding locals_count and max_stack_height"))
 }
 
 fn instrument_functions(ctx: &mut Context, module: &mut ModuleInfo) -> Result<()> {
@@ -303,7 +303,7 @@ fn instrument_function(ctx: &mut Context, func: FunctionBody) -> Result<wasm_enc
 	}
 
 	if call_peeker.next().is_some() {
-		return Err(anyhow!("Not all calls were used"))
+		return Err(anyhow!("not all calls were used"))
 	}
 
 	Ok(func_code_builder)

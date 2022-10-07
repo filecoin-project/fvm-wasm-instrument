@@ -20,8 +20,8 @@ use wasm_encoder::{
 };
 use wasmparser::{
 	CodeSectionReader, DataKind, DataSectionReader, ElementItem, ElementSectionReader,
-	ExportSectionReader, ExternalKind, FuncType, FunctionBody, ImportSectionReader, Operator, Type,
-	TypeRef,
+	ExportSectionReader, ExternalKind, FuncType, FunctionBody, ImportSectionReader, Operator,
+	SectionReader, Type, TypeRef,
 };
 
 pub const GAS_COUNTER_NAME: &str = "gas_counter";
@@ -451,18 +451,14 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
 	// Updating calling addresses (all calls to function index >= `gas_func` should be incremented)
 	if let Some(code_section) = module_info.raw_sections.get_mut(&SectionId::Code.into()) {
 		let mut code_section_builder = wasm_encoder::CodeSection::new();
-		let reader = CodeSectionReader::new(&code_section.data, 0)?;
-		for func_body_r in reader {
-			let func_body = func_body_r?; //todo opt this code
+		let mut code_sec_reader = CodeSectionReader::new(&code_section.data, 0)?;
+		while !code_sec_reader.eof() {
+			let func_body = code_sec_reader.read()?;
 			let mut func_builder = wasm_encoder::Function::new(copy_locals(&func_body)?);
-			let operators = func_body
-				.get_operators_reader()
-				.unwrap()
-				.into_iter()
-				.collect::<wasmparser::Result<Vec<Operator>>>()
-				.unwrap();
-			for instruction in operators {
-				match instruction {
+			let mut operator_reader = func_body.get_operators_reader()?;
+			while !operator_reader.eof() {
+				let op = operator_reader.read()?;
+				match op {
 					Operator::GlobalGet { global_index } =>
 						func_builder.instruction(&Instruction::GlobalGet(global_index + 1)),
 					Operator::GlobalSet { global_index } =>
@@ -500,9 +496,9 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
 
 	if let Some(export_section) = module_info.raw_sections.get_mut(&SectionId::Export.into()) {
 		let mut export_sec_builder = ExportSection::new();
-		let export_sec_reader = ExportSectionReader::new(&export_section.data, 0)?;
-		for export_r in export_sec_reader {
-			let export = export_r?; //todo
+		let mut export_sec_reader = ExportSectionReader::new(&export_section.data, 0)?;
+		while !export_sec_reader.eof() {
+			let export = export_sec_reader.read()?;
 			let mut global_index = export.index;
 			if let ExternalKind::Global = export.kind {
 				if global_index >= gas_global {
@@ -592,11 +588,9 @@ fn inject_grow_counter(
 ) -> Result<(Function, usize)> {
 	let mut counter = 0;
 	let mut new_func = Function::new(copy_locals(func_body)?);
-	let operators = func_body
-		.get_operators_reader()?
-		.into_iter()
-		.collect::<wasmparser::Result<Vec<Operator>>>()?;
-	for op in operators {
+	let mut operator_reader = func_body.get_operators_reader()?;
+	while !operator_reader.eof() {
+		let op = operator_reader.read()?;
 		match op {
 			Operator::MemoryGrow { .. } => {
 				//todo Bulk memories
@@ -617,10 +611,10 @@ fn generate_grow_counter<R: Rules>(rules: &R, gas_func: u32) -> Option<(Type, Fu
 		MemoryGrowCost::Linear(val) => val.get(),
 	};
 
-	let mut func = wasm_encoder::Function::new(vec![]);
+	let mut func = wasm_encoder::Function::new(None);
 	func.instruction(&wasm_encoder::Instruction::LocalGet(0));
 	func.instruction(&wasm_encoder::Instruction::LocalGet(0));
-	func.instruction(&wasm_encoder::Instruction::I64ExtendI32U); //todo the same as I64ExtendUI32 in parity wasm?
+	func.instruction(&wasm_encoder::Instruction::I64ExtendI32U);
 	func.instruction(&wasm_encoder::Instruction::I64Const(cost as i64));
 	func.instruction(&wasm_encoder::Instruction::I64Mul);
 	func.instruction(&wasm_encoder::Instruction::Call(gas_func));
@@ -637,7 +631,7 @@ fn generate_grow_counter<R: Rules>(rules: &R, gas_func: u32) -> Option<(Type, Fu
 
 fn generate_gas_counter(gas_global: u32) -> (Type, Function) {
 	use wasm_encoder::Instruction::*;
-	let mut func = wasm_encoder::Function::new(vec![]); //what is local
+	let mut func = wasm_encoder::Function::new(None);
 	func.instruction(&GlobalGet(gas_global));
 	func.instruction(&LocalGet(0));
 	func.instruction(&I64Sub);

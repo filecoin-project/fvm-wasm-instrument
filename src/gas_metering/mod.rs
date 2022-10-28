@@ -140,7 +140,7 @@ pub const GAS_COUNTER_NAME: &str = "gas_counter";
 /// This routine runs in time linear in the size of the input module.
 ///
 /// The function fails if the module contains any operation forbidden by gas rule set, returning
-/// the original module as an Err. Importing Global values is currently forbidden.
+/// the original module as an Err. Only one imported global is allowed per `gas_module_name`, the one corresponding to the gas spending measurement
 pub fn inject<R: Rules>(
 	module: elements::Module,
 	rules: &R,

@@ -105,7 +105,7 @@ impl Rules for ConstantCostRules {
 	}
 }
 
-pub const GAS_COUNTER_NAME: &str = "gas_couner";
+pub const GAS_COUNTER_NAME: &str = "gas_counter";
 
 /// Transforms a given module into one that charges gas for code to be executed by proxy of an
 /// imported gas metering function.
@@ -140,7 +140,7 @@ pub const GAS_COUNTER_NAME: &str = "gas_couner";
 /// This routine runs in time linear in the size of the input module.
 ///
 /// The function fails if the module contains any operation forbidden by gas rule set, returning
-/// the original module as an Err. Importing Global values is currently forbidden.
+/// the original module as an Err. Only one imported global is allowed per `gas_module_name`, the one corresponding to the gas spending measurement
 pub fn inject<R: Rules>(
 	module: elements::Module,
 	rules: &R,
@@ -214,17 +214,21 @@ pub fn inject<R: Rules>(
 				}
 			},
 
-			elements::Section::Import(export_section) =>
-				for export in export_section.entries() {
-					if let elements::External::Global(_) = export.external() {
-						if export.module() != gas_module_name && export.field() != GAS_COUNTER_NAME
-						{
-							error = true;
-							break
-						}
-					}
-				},
-
+			elements::Section::Import(import_section) => {
+				// Take the imports for the gasglobal
+				let gas_globals = import_section.entries().iter().filter(|&p| match p.external() {
+					elements::External::Global(g) =>
+						p.module() == gas_module_name &&
+							p.field() == GAS_COUNTER_NAME &&
+							g.is_mutable(),
+					_ => false,
+				});
+				// Ensure there is only one gas global import
+				if gas_globals.count() != 1 {
+					error = true;
+					break
+				}
+			},
 			elements::Section::Element(elements_section) => {
 				for segment in elements_section.entries_mut() {
 					if let Some(inst) = segment.offset() {
@@ -851,6 +855,48 @@ mod tests {
 				(call 1 (i64.const 1))
 				(get_global 1)))
 		"#
+	}
+
+	#[test]
+	fn test_gas_error_fvm_fuzzin_5() {
+		let input = r#"
+		(module
+			(type (;0;) (func (result i32)))
+			(type (;1;) (func (param i32)))
+			(type (;2;) (func (param i32) (result i32)))
+			(type (;3;) (func (param i32 i32)))
+			(type (;4;) (func (param i32) (result i64)))
+			(type (;5;) (func (param i32 i32 i32) (result i64)))
+			(type (;6;) (func (param i32 i32 i32)))
+			(type (;7;) (func (param i32 i32) (result i32)))
+			(type (;8;) (func (param i32 i32 i32 i32)))
+			(type (;9;) (func (param i64 i32) (result i64)))
+			(type (;10;) (func (param i32 i64)))
+			(import "env" "memory" (memory (;0;) 256 256))
+			(import "env" "DYNAMICTOP_PTR" (global (;0;) i32))
+			(import "env" "STACKTOP" (global (;1;) i32))
+			(import "env" "enlargeMemory" (func (;0;) (type 0)))
+			(import "env" "getTotalMemory" (func (;1;) (type 0)))
+			(import "env" "abortOnCannotGrowMemory" (func (;2;) (type 0)))
+			(import "env" "___setErrNo" (func (;3;) (type 1)))
+			(func (;4;) (type 9) (param i64 i32) (result i64)
+			  local.get 0
+			  i32.const 64
+			  local.get 1
+			  i32.sub
+			  i64.extend_i32_u
+			  i64.shl
+			  local.get 0
+			  local.get 1
+			  i64.extend_i32_u
+			  i64.shr_u
+			  i64.or
+			)
+		  )
+		"#;
+		let input_module = parse_wat(input);
+		let injected_module = inject(input_module, &ConstantCostRules::default(), "other")
+			.expect("inject_gas_counter call failed");
 	}
 
 	test_gas_counter_injection! {

@@ -450,8 +450,6 @@ fn inject_dynamic_counters(instructions: &mut elements::Instructions, dyn_funcs:
 	use parity_wasm::elements::Instruction::*;
 	let mut counter = 0;
 	for instruction in instructions.elements_mut() {
-		// TODO CHECK FOR CONST!!!!
-
 		if let Some(func_idx ) = dyn_funcs.get(instruction) {
 			*instruction = Call(*func_idx);
 			counter += 1;
@@ -837,8 +835,8 @@ mod tests {
 			)"#,
 		);
 
-		// todo linear charge for memory.init
-		let injected_module = inject(module, &TestRules{}, "env").unwrap();
+		let mut injected_module = inject(module, &TestRules{}, "env").unwrap();
+		fix_wasm_sections(&mut injected_module);
 
 		// global0 - gas
 		// global1 - orig global0
@@ -957,6 +955,17 @@ mod tests {
 		wasmparser::validate(&binary).unwrap();
 	}
 
+	fn fix_wasm_sections(module: &mut elements::Module) {
+		module
+			.sections_mut()
+			.retain(|sec| !matches!(sec, elements::Section::DataCount(_)));
+		if let Some(data_count) = module.data_section().map(|data| data.entries().len()) {
+			module
+				.insert_section(elements::Section::DataCount(data_count as u32))
+				.expect("section wasn't deleted");
+		}
+	}
+
 	#[test]
 	fn grow_no_gas_no_track() {
 		let module = parse_wat(
@@ -1048,6 +1057,7 @@ mod tests {
 
 	fn parse_wat(source: &str) -> elements::Module {
 		let module_bytes = wat::parse_str(source).unwrap();
+		wasmparser::validate(&module_bytes).unwrap();
 		elements::deserialize_buffer(module_bytes.as_ref()).unwrap()
 	}
 

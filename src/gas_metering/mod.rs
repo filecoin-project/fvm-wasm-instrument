@@ -76,7 +76,7 @@ impl Default for ConstantCostRules {
 impl Rules for ConstantCostRules {
 	fn instruction_cost(&self, i: &Instruction) -> Result<InstructionCost, ()> {
 		match i {
-			Instruction::GrowMemory(_) => Ok(NonZeroU64::new(self.memory_grow_cost).map_or(InstructionCost::Fixed(0), |c|InstructionCost::Linear(0, c))),
+			Instruction::GrowMemory(_) => Ok(NonZeroU64::new(self.memory_grow_cost).map_or(InstructionCost::Fixed(1), |c|InstructionCost::Linear(1, c))),
 			_ => Ok(InstructionCost::Fixed(self.instruction_cost)),
 		}
 	}
@@ -485,7 +485,7 @@ fn add_dynamic_counters<R: Rules>(
 
 		// first get all params back onto the stack
 		for (i, _) in params.into_iter().enumerate() {
-			counter_body.push(GetGlobal(i as u32))
+			counter_body.push(GetLocal(i as u32))
 		}
 
 		// get the dynamic param back onto the stack
@@ -762,6 +762,23 @@ mod tests {
 		);
 		// 1 is gas counter
 		assert_eq!(
+			get_function_body(&injected_module, 1).unwrap(),
+			&vec![
+				GetGlobal(0),
+				GetLocal(0),
+				I64Sub,
+				SetGlobal(0),
+				GetGlobal(0),
+				I64Const(0),
+				I64LtS,
+				If(BlockType::NoResult),
+				Unreachable,
+				End,
+				End
+			][..]
+		);
+		// 2 is mem-grow gas charge func
+		assert_eq!(
 			get_function_body(&injected_module, 2).unwrap(),
 			&vec![
 				GetLocal(0),
@@ -771,7 +788,7 @@ mod tests {
 				I64Mul,
 				Call(1),
 				GrowMemory(0),
-				End,
+				End
 			][..]
 		);
 

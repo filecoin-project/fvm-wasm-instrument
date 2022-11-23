@@ -801,6 +801,22 @@ mod tests {
 	fn simple_grow_two() {
 		// this test checks dynamic counter for instructions with different const param
 
+		pub struct TestRules {}
+		impl Rules for TestRules {
+			fn instruction_cost(&self, i: &Instruction) -> Result<InstructionCost, ()> {
+				println!("ICost {:?}", i);
+
+				Ok(match i {
+					Instruction::GrowMemory(_) => InstructionCost::Linear(1, NonZeroU64::new(10).unwrap()),
+					Instruction::Bulk(BulkInstruction::MemoryInit(_)) => {
+						println!("MEM INIT");
+						InstructionCost::Linear(3,  NonZeroU64::new(12).unwrap())
+					},
+					_ => InstructionCost::Fixed(1),
+				})
+			}
+		}
+
 		let module = parse_wat(
 			r#"(module
 			(data "gm")
@@ -808,32 +824,70 @@ mod tests {
 			(func (result i32)
 			  global.get 0
 			  memory.grow
-			  (memory.init 1
+			  (memory.init 1 0
 				  (i32.const 16)
 				  (i32.const 0)
-				  (i32.const 7))
-			  (memory.init 0
+				  (i32.mul (i32.const 7) (i32.const 1)))
+			  (memory.init 0 0
 				  (i32.const 8)
 				  (i32.const 0)
-				  (i32.const 2)))
+				  (i32.mul (i32.const 2) (i32.const 1))))
 			(global i32 (i32.const 42))
 			(memory 0 1)
 			)"#,
 		);
 
 		// todo linear charge for memory.init
-		let injected_module = inject(module, &ConstantCostRules::new(1, 10_000), "env").unwrap();
+		let injected_module = inject(module, &TestRules{}, "env").unwrap();
 
 		// global0 - gas
 		// global1 - orig global0
 		// func0 - main
 		// func1 - gas_counter
-		// func2 - grow_counter
+		// func[c1] - grow_counter
+		// func[c2] - meminit1_counter
+		// func[c3] - meminit0_counter
 
-		// todo this func body is not updated
+		let (c1, c2, c3) = match get_function_body(&injected_module, 0).unwrap() {
+			&[I64Const(18), Call(1), GetGlobal(1), Call(c1),
+			I32Const(16), I32Const(0), I32Const(7),	I32Const(1), I32Mul, Call(c2),
+			I32Const(8), I32Const(0), I32Const(2), I32Const(1),	I32Mul,	Call(c3),
+			End] => {
+				(c1, c2, c3)
+			}
+			x => panic!("{:?}", x)
+		};
+
+
 		assert_eq!(
 			get_function_body(&injected_module, 0).unwrap(),
-			&vec![I64Const(2), Call(1), GetGlobal(1), Call(2), End][..]
+			&vec![I64Const(18),
+				  Call(1), // charge base gas
+
+				  GetGlobal(1),
+				  Call(c1), // mem grow
+
+				  // params for first mem init
+				  I32Const(16),
+				  I32Const(0),
+
+				  I32Const(7),
+				  I32Const(1),
+				  I32Mul, // if stack top is const linear charge will get pre-computed
+
+				  Call(c2),
+
+				  // params for second mem init
+				  I32Const(8),
+				  I32Const(0),
+
+				  I32Const(2),
+				  I32Const(1),
+				  I32Mul,
+
+				  Call(c3),
+				  End
+			][..]
 		);
 		// 1 is gas counter
 		assert_eq!(
@@ -852,17 +906,49 @@ mod tests {
 				End
 			][..]
 		);
-		// 2 is mem-grow gas charge func
+		// c1 is mem-grow gas charge func
 		assert_eq!(
-			get_function_body(&injected_module, 2).unwrap(),
+			get_function_body(&injected_module, c1.try_into().unwrap()).unwrap(),
 			&vec![
 				GetLocal(0),
 				GetLocal(0),
 				I64ExtendUI32,
-				I64Const(10000),
+				I64Const(10),
 				I64Mul,
 				Call(1),
 				GrowMemory(0),
+				End
+			][..]
+		);
+		// c2 is mem-init(1) gas charge func
+		assert_eq!(
+			get_function_body(&injected_module, c2.try_into().unwrap()).unwrap(),
+			&vec![
+				GetLocal(0),
+				GetLocal(1),
+				GetLocal(2),
+				GetLocal(2),
+				I64ExtendUI32,
+				I64Const(12),
+				I64Mul,
+				Call(1),
+				Bulk(BulkInstruction::MemoryInit(1)),
+				End
+			][..]
+		);
+		// c3 is mem-init(0) gas charge func
+		assert_eq!(
+			get_function_body(&injected_module, c3.try_into().unwrap()).unwrap(),
+			&vec![
+				GetLocal(0),
+				GetLocal(1),
+				GetLocal(2),
+				GetLocal(2),
+				I64ExtendUI32,
+				I64Const(12),
+				I64Mul,
+				Call(1),
+				Bulk(BulkInstruction::MemoryInit(0)),
 				End
 			][..]
 		);

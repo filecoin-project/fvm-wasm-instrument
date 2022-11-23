@@ -534,7 +534,7 @@ fn instruction_signature(instr: &Instruction) -> Result<(&'static[ValueType], &'
 		Bulk(BulkInstruction::MemoryCopy) |
 		Bulk(BulkInstruction::MemoryFill) |
 		Bulk(BulkInstruction::TableInit(_)) |
-		Bulk(BulkInstruction::TableCopy) => Ok((&[ValueType::I32, ValueType::I32, ValueType::I32], ())),
+		Bulk(BulkInstruction::TableCopy) => Ok((&[ValueType::I32, ValueType::I32, ValueType::I32], &[])),
 
 		_ => Err(()) // "instruction not supported" todo anyhow
 	}
@@ -756,6 +756,81 @@ mod tests {
 		// func1 - gas_counter
 		// func2 - grow_counter
 
+		assert_eq!(
+			get_function_body(&injected_module, 0).unwrap(),
+			&vec![I64Const(2), Call(1), GetGlobal(1), Call(2), End][..]
+		);
+		// 1 is gas counter
+		assert_eq!(
+			get_function_body(&injected_module, 1).unwrap(),
+			&vec![
+				GetGlobal(0),
+				GetLocal(0),
+				I64Sub,
+				SetGlobal(0),
+				GetGlobal(0),
+				I64Const(0),
+				I64LtS,
+				If(BlockType::NoResult),
+				Unreachable,
+				End,
+				End
+			][..]
+		);
+		// 2 is mem-grow gas charge func
+		assert_eq!(
+			get_function_body(&injected_module, 2).unwrap(),
+			&vec![
+				GetLocal(0),
+				GetLocal(0),
+				I64ExtendUI32,
+				I64Const(10000),
+				I64Mul,
+				Call(1),
+				GrowMemory(0),
+				End
+			][..]
+		);
+
+		let binary = serialize(injected_module).expect("serialization failed");
+		wasmparser::validate(&binary).unwrap();
+	}
+
+	#[cfg(feature = "bulk")]
+	#[test]
+	fn simple_grow_two() {
+		// this test checks dynamic counter for instructions with different const param
+
+		let module = parse_wat(
+			r#"(module
+			(data "gm")
+			(data "goodbye")
+			(func (result i32)
+			  global.get 0
+			  memory.grow
+			  (memory.init 1
+				  (i32.const 16)
+				  (i32.const 0)
+				  (i32.const 7))
+			  (memory.init 0
+				  (i32.const 8)
+				  (i32.const 0)
+				  (i32.const 2)))
+			(global i32 (i32.const 42))
+			(memory 0 1)
+			)"#,
+		);
+
+		// todo linear charge for memory.init
+		let injected_module = inject(module, &ConstantCostRules::new(1, 10_000), "env").unwrap();
+
+		// global0 - gas
+		// global1 - orig global0
+		// func0 - main
+		// func1 - gas_counter
+		// func2 - grow_counter
+
+		// todo this func body is not updated
 		assert_eq!(
 			get_function_body(&injected_module, 0).unwrap(),
 			&vec![I64Const(2), Call(1), GetGlobal(1), Call(2), End][..]

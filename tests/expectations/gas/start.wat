@@ -22,7 +22,7 @@
     global.get 0
     i64.const 0
     i64.lt_s
-    if  ;; label = @1
+    if ;; label = @1
       unreachable
     end
   )

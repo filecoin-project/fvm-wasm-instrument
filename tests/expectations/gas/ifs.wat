@@ -6,7 +6,7 @@
     i64.const 2
     call 1
     i32.const 1
-    if (result i32)  ;; label = @1
+    if (result i32) ;; label = @1
       i64.const 3
       call 1
       local.get $x
@@ -27,7 +27,7 @@
     global.get 0
     i64.const 0
     i64.lt_s
-    if  ;; label = @1
+    if ;; label = @1
       unreachable
     end
   )

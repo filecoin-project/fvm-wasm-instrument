@@ -518,7 +518,18 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
 		let import_sec_reader = ImportSectionReader::new(&import_section.data, 0)?;
 		let gas_globals = import_sec_reader.into_iter().filter(|r| match r {
 			Ok(p) => match p.ty {
-				TypeRef::Global(g) => p.module == gas_module_name && p.name == GAS_COUNTER_NAME && g.mutable,
+				TypeRef::Global(g) => {
+					println!("{:?} {}", p, gas_module_name);
+
+					if p.module == gas_module_name && p.name == GAS_COUNTER_NAME {
+						if !g.mutable {
+							error = true
+						}
+
+						true
+					} else { false }
+				},
+
 				_ => false
 			},
 			_ => false
@@ -750,6 +761,16 @@ mod tests {
 		let func_body = func_bodies
 			.get(index)
 			.unwrap_or_else(|| panic!("module don't have function {}body", index));
+
+		let list = func_body
+			.get_operators_reader()
+			.unwrap()
+			.into_iter()
+			.map(|op| DefaultTranslator.translate_op(&op.unwrap()).unwrap())
+			.collect::<Vec<Instruction>>();
+
+		println!("{:?}", list);
+
 		let start = func_body.get_operators_reader().unwrap().original_position();
 		func_sec.data[start..func_body.range().end].to_vec()
 	}
@@ -786,7 +807,7 @@ mod tests {
 			&[I64Const(2), Call(1), GlobalGet(1), Call(2), End,]
 		));
 
-		// 1 is gas counter
+		// 2 is grow counter
 		assert!(check_expect_function_body(
 			&injected_raw_wasm,
 			2,
@@ -954,6 +975,51 @@ mod tests {
 		let injected_raw_wasm = inject(&raw_wasm, &ConstantCostRules::default(), "other")
 			.expect("inject_gas_counter call failed");
 		wasmparser::validate(&injected_raw_wasm).unwrap();
+
+		assert!(check_expect_function_body(
+			&injected_raw_wasm,
+			0,
+			&[
+				I64Const(11), Call(5), LocalGet(0), I32Const(64), LocalGet(1), I32Sub, I64ExtendI32U, I64Shl, LocalGet(0), LocalGet(1), I64ExtendI32U, I64ShrU, I64Or, End,
+			]
+		));
+
+		// 1 is gas counter
+		assert!(check_expect_function_body(
+			&injected_raw_wasm,
+			1,
+			&[
+				GlobalGet(2), // 2 imported globals, so gas one is third
+				LocalGet(0),
+				I64Sub,
+				GlobalSet(2),
+				GlobalGet(2),
+				I64Const(0),
+				I64LtS,
+				If(BlockType::Empty),
+				Unreachable,
+				End,
+				End
+			]
+		));
+	}
+
+	#[test]
+	fn test_user_gas_global_fails() {
+		let input = r#"
+		(module
+			(type (;0;) (func (param i64 i32) (result i64)))
+			(import "other" "gas_counter" (global (;0;) i64))
+			(func (;0;) (type 0) (param i64 i32) (result i64)
+			  local.get 0
+			  local.get 1
+			  i64.or
+			)
+		  )
+		"#;
+		let raw_wasm = parse_wat(input).bytes();
+		let estr = inject(&raw_wasm, &ConstantCostRules::default(), "other").unwrap_err().to_string();
+		assert!(estr == "expected 1 gas global", "error was {}", estr);
 	}
 
 	test_gas_counter_injection! {

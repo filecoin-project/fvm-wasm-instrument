@@ -1,13 +1,16 @@
 # fvm-wasm-instrument
 
-This is a fork of [wasm-instrumet](https://github.com/paritytech/wasm-instrument) with a couple of FVM-specific changes.
+This started as a [wasm-instrumet](https://github.com/paritytech/wasm-instrument) with some FVM specific changes, but has since been significantly refactored to move away from parity-wasm which reached EOL.
 
-wasm-instrument is a Rust library containing a collection of wasm module instrumentations and transformations
-mainly useful for wasm based block chains and smart contracts.
+fvm-wasm-instrument is a Rust library containing a collection of WASM module instrumentations and
+transformations mainly useful for wasm based block chains and smart contracts.
 
 ## Provided functionality
 
-This is a non exhaustive list of provided functionality. Please check out the [documentation](https://docs.rs/wasm-instrument/latest/wasm_instrument/) for details.
+This library provides two features:
+
+- Gas metering.
+- Stack height limiting.
 
 ### Gas Metering
 

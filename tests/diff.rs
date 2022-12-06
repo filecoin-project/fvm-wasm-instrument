@@ -1,4 +1,4 @@
-use fvm_wasm_instrument::{self as instrument, parity_wasm::elements};
+use fvm_wasm_instrument::{self as instrument};
 use std::{
 	fs,
 	io::{self, Read, Write},
@@ -72,11 +72,7 @@ mod stack_height {
 			#[test]
 			fn $name() {
 				run_diff_test("stack-height", concat!(stringify!($name), ".wat"), |input| {
-					let module =
-						elements::deserialize_buffer(input).expect("Failed to deserialize");
-					let instrumented = instrument::inject_stack_limiter(module, 1024)
-						.expect("Failed to instrument with stack counter");
-					elements::serialize(instrumented).expect("Failed to serialize")
+					instrument::inject_stack_limiter(input, 1024).unwrap()
 				});
 			}
 		};
@@ -100,12 +96,7 @@ mod gas {
 			fn $name() {
 				run_diff_test("gas", concat!(stringify!($name), ".wat"), |input| {
 					let rules = instrument::gas_metering::ConstantCostRules::default();
-
-					let module =
-						elements::deserialize_buffer(input).expect("Failed to deserialize");
-					let instrumented = instrument::gas_metering::inject(module, &rules, "env")
-						.expect("Failed to instrument with gas metering");
-					elements::serialize(instrumented).expect("Failed to serialize")
+					instrument::gas_metering::inject(&input, &rules, "env").unwrap()
 				});
 			}
 		};

@@ -1,7 +1,4 @@
-use fvm_wasm_instrument::{
-	gas_metering, inject_stack_limiter,
-	parity_wasm::{deserialize_buffer, elements::Module, serialize},
-};
+use fvm_wasm_instrument::{gas_metering, inject_stack_limiter};
 use std::{
 	fs::{read, read_dir},
 	path::PathBuf,
@@ -25,34 +22,21 @@ fn print_size_overhead() {
 			let entry = entry.unwrap();
 			let (orig_len, orig_module) = {
 				let bytes = read(&entry.path()).unwrap();
-				let len = bytes.len();
-				let module: Module = deserialize_buffer(&bytes).unwrap();
-				(len, module)
+				(bytes.len(), bytes)
 			};
 			let (gas_metering_len, gas_module) = {
 				let module = gas_metering::inject(
-					orig_module.clone(),
+					&orig_module,
 					&gas_metering::ConstantCostRules::default(),
 					"env",
 				)
 				.unwrap();
-				let bytes = serialize(module.clone()).unwrap();
-				let len = bytes.len();
-				(len, module)
+				(module.len(), module)
 			};
-			let stack_height_len = {
-				let module = inject_stack_limiter(orig_module, 128).unwrap();
-				let bytes = serialize(module).unwrap();
-				bytes.len()
-			};
-			let both_len = {
-				let module = inject_stack_limiter(gas_module, 128).unwrap();
-				let bytes = serialize(module).unwrap();
-				bytes.len()
-			};
+			let stack_height_len = inject_stack_limiter(&orig_module, 128).unwrap().len();
+			let both_len = inject_stack_limiter(&gas_module, 128).unwrap().len();
 
 			let overhead = both_len * 100 / orig_len;
-
 			(
 				overhead,
 				format!(

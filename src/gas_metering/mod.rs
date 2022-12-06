@@ -5,18 +5,26 @@
 //! and details.
 
 #[cfg(test)]
-mod validation;
+pub mod validation;
 
-use alloc::{vec, vec::Vec};
-use core::{cmp::min, mem, num::NonZeroU64};
-use parity_wasm::{
-	builder,
-	elements::{
-		self, BlockType, Instruction,
-		Instruction::{End, I32Const},
-		ValueType,
-	},
+use crate::utils::{
+	copy_locals,
+	translator::{DefaultTranslator, Translator},
+	truncate_len_from_encoder, ModuleInfo,
 };
+use alloc::{vec, vec::Vec};
+use anyhow::{anyhow, Result};
+use core::{cmp::min, mem, num::NonZeroU64};
+use wasm_encoder::{
+	BlockType, ExportSection, Function, ImportSection, Instruction, SectionId, ValType,
+};
+use wasmparser::{
+	CodeSectionReader, DataKind, DataSectionReader, ElementItem, ElementSectionReader,
+	ExportSectionReader, ExternalKind, FuncType, FunctionBody, ImportSectionReader, Operator,
+	SectionReader, Type, TypeRef,
+};
+
+pub const GAS_COUNTER_NAME: &str = "gas_counter";
 
 /// An interface that describes instruction costs.
 pub trait Rules {
@@ -25,7 +33,7 @@ pub trait Rules {
 	/// Returning `None` makes the gas instrumention end with an error. This is meant
 	/// as a way to have a partial rule set where any instruction that is not specifed
 	/// is considered as forbidden.
-	fn instruction_cost(&self, instruction: &Instruction) -> Option<u64>;
+	fn instruction_cost(&self, instruction: &Operator) -> Option<u64>;
 
 	/// Returns the costs for growing the memory using the `memory.grow` instruction.
 	///
@@ -96,178 +104,13 @@ impl Default for ConstantCostRules {
 }
 
 impl Rules for ConstantCostRules {
-	fn instruction_cost(&self, _: &Instruction) -> Option<u64> {
+	fn instruction_cost(&self, _: &Operator) -> Option<u64> {
 		Some(self.instruction_cost)
 	}
 
 	fn memory_grow_cost(&self) -> MemoryGrowCost {
 		NonZeroU64::new(self.memory_grow_cost).map_or(MemoryGrowCost::Free, MemoryGrowCost::Linear)
 	}
-}
-
-pub const GAS_COUNTER_NAME: &str = "gas_counter";
-
-/// Transforms a given module into one that charges gas for code to be executed by proxy of an
-/// imported gas metering function.
-///
-/// The output module imports a mutable global i64 $GAS_COUNTER_NAME ("gas_couner") from the
-/// specified module. The value specifies the amount of available units of gas. A new function
-/// doing gas accounting using this global is added to the module. Having the accounting logic
-/// in WASM lets us avoid the overhead of external calls.
-///
-/// The body of each function is divided into metered blocks, and the calls to charge gas are
-/// inserted at the beginning of every such block of code. A metered block is defined so that,
-/// unless there is a trap, either all of the instructions are executed or none are. These are
-/// similar to basic blocks in a control flow graph, except that in some cases multiple basic
-/// blocks can be merged into a single metered block. This is the case if any path through the
-/// control flow graph containing one basic block also contains another.
-///
-/// Charging gas is at the beginning of each metered block ensures that 1) all instructions
-/// executed are already paid for, 2) instructions that will not be executed are not charged for
-/// unless execution traps, and 3) the number of calls to "gas" is minimized. The corollary is that
-/// modules instrumented with this metering code may charge gas for instructions not executed in
-/// the event of a trap.
-///
-/// Additionally, each `memory.grow` instruction found in the module is instrumented to first make
-/// a call to charge gas for the additional pages requested. This cannot be done as part of the
-/// block level gas charges as the gas cost is not static and depends on the stack argument to
-/// `memory.grow`.
-///
-/// The above transformations are performed for every function body defined in the module. This
-/// function also rewrites all function indices references by code, table elements, etc., since
-/// the addition of an imported functions changes the indices of module-defined functions.
-///
-/// This routine runs in time linear in the size of the input module.
-///
-/// The function fails if the module contains any operation forbidden by gas rule set, returning
-/// the original module as an Err. Only one imported global is allowed per `gas_module_name`, the one corresponding to the gas spending measurement
-pub fn inject<R: Rules>(
-	module: elements::Module,
-	rules: &R,
-	gas_module_name: &str,
-) -> Result<elements::Module, elements::Module> {
-	// Injecting gas counting external
-
-	let mut mbuilder = builder::from_module(module);
-	mbuilder.push_import(
-		builder::import()
-			.module(gas_module_name)
-			.field(GAS_COUNTER_NAME)
-			.external()
-			.global(ValueType::I64, true)
-			.build(),
-	);
-
-	// back to plain module
-	let mut module = mbuilder.build();
-
-	// calculate actual global index of the imported definition
-	//    (subtract all imports that are NOT globals)
-
-	let gas_global = module.import_count(elements::ImportCountType::Global) as u32 - 1;
-
-	let total_func = module.functions_space() as u32;
-
-	// We'll push the gas counter fuction after all other functions
-	let gas_func = total_func;
-
-	// grow_cnt_func is optional, so we put it after the gas function which always exists
-	let grow_cnt_func = total_func + 1;
-
-	let mut need_grow_counter = false;
-	let mut error = false;
-
-	// Updating calling addresses (all calls to function index >= `gas_func` should be incremented)
-	for section in module.sections_mut() {
-		match section {
-			elements::Section::Code(code_section) =>
-				for func_body in code_section.bodies_mut() {
-					for instruction in func_body.code_mut().elements_mut().iter_mut() {
-						match instruction {
-							Instruction::GetGlobal(global_index) |
-							Instruction::SetGlobal(global_index)
-								if *global_index >= gas_global =>
-								*global_index += 1,
-							_ => {},
-						}
-					}
-
-					if inject_counter(func_body.code_mut(), rules, gas_func).is_err() {
-						error = true;
-						break
-					}
-					if rules.memory_grow_cost().enabled() &&
-						inject_grow_counter(func_body.code_mut(), grow_cnt_func) > 0
-					{
-						need_grow_counter = true;
-					}
-				},
-
-			// adjust global exports
-			elements::Section::Export(export_section) => {
-				for export in export_section.entries_mut() {
-					if let elements::Internal::Global(global_index) = export.internal_mut() {
-						if *global_index >= gas_global {
-							*global_index += 1;
-						}
-					}
-				}
-			},
-
-			elements::Section::Import(import_section) => {
-				// Take the imports for the gasglobal
-				let gas_globals = import_section.entries().iter().filter(|&p| match p.external() {
-					elements::External::Global(g) =>
-						p.module() == gas_module_name &&
-							p.field() == GAS_COUNTER_NAME &&
-							g.is_mutable(),
-					_ => false,
-				});
-				// Ensure there is only one gas global import
-				if gas_globals.count() != 1 {
-					error = true;
-					break
-				}
-			},
-			elements::Section::Element(elements_section) => {
-				for segment in elements_section.entries_mut() {
-					if let Some(inst) = segment.offset() {
-						if !check_offset_code(inst.code()) {
-							error = true;
-							break
-						}
-					}
-				}
-			},
-			elements::Section::Data(data_section) =>
-				for segment in data_section.entries_mut() {
-					if let Some(inst) = segment.offset() {
-						if !check_offset_code(inst.code()) {
-							error = true;
-							break
-						}
-					}
-				},
-
-			_ => {},
-		}
-	}
-
-	if error {
-		return Err(module)
-	}
-
-	module = add_gas_counter(module, gas_global);
-
-	if need_grow_counter {
-		Ok(add_grow_counter(module, rules, gas_func))
-	} else {
-		Ok(module)
-	}
-}
-
-fn check_offset_code(code: &[Instruction]) -> bool {
-	matches!(code, [I32Const(_), End])
 }
 
 /// A control flow block is opened with the `block`, `loop`, and `if` instructions and is closed
@@ -349,13 +192,13 @@ impl Counter {
 
 	/// Close the last control block. The cursor is the position of the final (pseudo-)instruction
 	/// in the block.
-	fn finalize_control_block(&mut self, cursor: usize) -> Result<(), ()> {
+	fn finalize_control_block(&mut self, cursor: usize) -> Result<()> {
 		// This either finalizes the active metered block or merges its cost into the active
 		// metered block in the previous control block on the stack.
 		self.finalize_metered_block(cursor)?;
 
 		// Pop the control block stack.
-		let closing_control_block = self.stack.pop().ok_or(())?;
+		let closing_control_block = self.stack.pop().ok_or_else(|| anyhow!("stack not found"))?;
 		let closing_control_index = self.stack.len();
 
 		if self.stack.is_empty() {
@@ -364,7 +207,7 @@ impl Counter {
 
 		// Update the lowest_forward_br_target for the control block now on top of the stack.
 		{
-			let control_block = self.stack.last_mut().ok_or(())?;
+			let control_block = self.stack.last_mut().ok_or_else(|| anyhow!("stack not found"))?;
 			control_block.lowest_forward_br_target = min(
 				control_block.lowest_forward_br_target,
 				closing_control_block.lowest_forward_br_target,
@@ -384,9 +227,9 @@ impl Counter {
 	/// Finalize the current active metered block.
 	///
 	/// Finalized blocks have final cost which will not change later.
-	fn finalize_metered_block(&mut self, cursor: usize) -> Result<(), ()> {
+	fn finalize_metered_block(&mut self, cursor: usize) -> Result<()> {
 		let closing_metered_block = {
-			let control_block = self.stack.last_mut().ok_or(())?;
+			let control_block = self.stack.last_mut().ok_or_else(|| anyhow!("stack not found"))?;
 			mem::replace(
 				&mut control_block.active_metered_block,
 				MeteredBlock { start_pos: cursor + 1, cost: 0 },
@@ -421,20 +264,22 @@ impl Counter {
 	/// instruction in the program. The indices are the stack positions of the target control
 	/// blocks. Recall that the index is 0 for a `return` and relatively indexed from the top of
 	/// the stack by the label of `br`, `br_if`, and `br_table` instructions.
-	fn branch(&mut self, cursor: usize, indices: &[usize]) -> Result<(), ()> {
+	fn branch(&mut self, cursor: usize, indices: &[usize]) -> Result<()> {
 		self.finalize_metered_block(cursor)?;
 
 		// Update the lowest_forward_br_target of the current control block.
 		for &index in indices {
 			let target_is_loop = {
-				let target_block = self.stack.get(index).ok_or(())?;
+				let target_block =
+					self.stack.get(index).ok_or_else(|| anyhow!("unable to find stack index"))?;
 				target_block.is_loop
 			};
 			if target_is_loop {
 				continue
 			}
 
-			let control_block = self.stack.last_mut().ok_or(())?;
+			let control_block =
+				self.stack.last_mut().ok_or_else(|| anyhow!("unable to find stack index"))?;
 			control_block.lowest_forward_br_target =
 				min(control_block.lowest_forward_br_target, index);
 		}
@@ -448,116 +293,42 @@ impl Counter {
 	}
 
 	/// Get a reference to the currently active metered block.
-	fn active_metered_block(&mut self) -> Result<&mut MeteredBlock, ()> {
-		let top_block = self.stack.last_mut().ok_or(())?;
+	fn active_metered_block(&mut self) -> Result<&mut MeteredBlock> {
+		let top_block = self.stack.last_mut().ok_or_else(|| anyhow!("stack not exit"))?;
 		Ok(&mut top_block.active_metered_block)
 	}
 
 	/// Increment the cost of the current block by the specified value.
-	fn increment(&mut self, val: u64) -> Result<(), ()> {
+	fn increment(&mut self, val: u64) -> Result<()> {
 		let top_block = self.active_metered_block()?;
-		top_block.cost = top_block.cost.checked_add(val).ok_or(())?;
+		top_block.cost =
+			top_block.cost.checked_add(val).ok_or_else(|| anyhow!("add cost overflow"))?;
 		Ok(())
 	}
 }
 
-fn inject_grow_counter(instructions: &mut elements::Instructions, grow_counter_func: u32) -> usize {
-	use parity_wasm::elements::Instruction::*;
-	let mut counter = 0;
-	for instruction in instructions.elements_mut() {
-		if let GrowMemory(_) = *instruction {
-			*instruction = Call(grow_counter_func);
-			counter += 1;
-		}
-	}
-	counter
-}
-
-fn add_grow_counter<R: Rules>(
-	module: elements::Module,
-	rules: &R,
-	gas_func: u32,
-) -> elements::Module {
-	use parity_wasm::elements::Instruction::*;
-
-	let cost = match rules.memory_grow_cost() {
-		MemoryGrowCost::Free => return module,
-		MemoryGrowCost::Linear(val) => val.get(),
-	};
-
-	let mut b = builder::from_module(module);
-	b.push_function(
-		builder::function()
-			.signature()
-			.with_param(ValueType::I32)
-			.with_result(ValueType::I32)
-			.build()
-			.body()
-			.with_instructions(elements::Instructions::new(vec![
-				GetLocal(0),
-				GetLocal(0),
-				I64ExtendUI32,
-				I64Const(cost as i64),
-				I64Mul,
-				// todo: there should be strong guarantee that it does not return anything on
-				// stack?
-				Call(gas_func),
-				GrowMemory(0),
-				End,
-			]))
-			.build()
-			.build(),
-	);
-
-	b.build()
-}
-
-fn add_gas_counter(module: elements::Module, gas_global: u32) -> elements::Module {
-	use parity_wasm::elements::Instruction::*;
-
-	let mut b = builder::from_module(module);
-	b.push_function(
-		builder::function()
-			.signature()
-			.with_param(ValueType::I64)
-			.build()
-			.body()
-			.with_instructions(elements::Instructions::new(vec![
-				GetGlobal(gas_global), // (oldgas)
-				GetLocal(0),           // (oldgas) (used)
-				I64Sub,                // (newgas)
-				SetGlobal(gas_global), //
-				GetGlobal(gas_global), // (newgas)
-				I64Const(0),           // (newgas) (0)
-				I64LtS,                // (newgas ltz)
-				If(BlockType::NoResult),
-				Unreachable,
-				End,
-				End,
-			]))
-			.build()
-			.build(),
-	);
-
-	b.build()
-}
-
 fn determine_metered_blocks<R: Rules>(
-	instructions: &elements::Instructions,
+	func_body: &wasmparser::FunctionBody,
 	rules: &R,
-) -> Result<Vec<MeteredBlock>, ()> {
-	use parity_wasm::elements::Instruction::*;
+) -> Result<Vec<MeteredBlock>> {
+	use wasmparser::Operator::*;
 
 	let mut counter = Counter::new();
-
 	// Begin an implicit function (i.e. `func...end`) block.
 	counter.begin_control_block(0, false);
 
-	for cursor in 0..instructions.elements().len() {
-		let instruction = &instructions.elements()[cursor];
-		let instruction_cost = rules.instruction_cost(instruction).ok_or(())?;
+	let operators = func_body
+		.get_operators_reader()
+		.unwrap()
+		.into_iter()
+		.collect::<wasmparser::Result<Vec<Operator>>>()
+		.unwrap();
+	for (cursor, instruction) in operators.iter().enumerate() {
+		let instruction_cost = rules
+			.instruction_cost(instruction)
+			.ok_or_else(|| anyhow!("check gas rule fail"))?;
 		match instruction {
-			Block(_) => {
+			Block { ty: _ } => {
 				counter.increment(instruction_cost)?;
 
 				// Begin new block. The cost of the following opcodes until `end` or `else` will
@@ -567,11 +338,11 @@ fn determine_metered_blocks<R: Rules>(
 				let top_block_start_pos = counter.active_metered_block()?.start_pos;
 				counter.begin_control_block(top_block_start_pos, false);
 			},
-			If(_) => {
+			If { ty: _ } => {
 				counter.increment(instruction_cost)?;
 				counter.begin_control_block(cursor + 1, false);
 			},
-			Loop(_) => {
+			wasmparser::Operator::Loop { ty: _ } => {
 				counter.increment(instruction_cost)?;
 				counter.begin_control_block(cursor + 1, true);
 			},
@@ -581,27 +352,35 @@ fn determine_metered_blocks<R: Rules>(
 			Else => {
 				counter.finalize_metered_block(cursor)?;
 			},
-			Br(label) | BrIf(label) => {
+			wasmparser::Operator::Br { relative_depth: label } |
+			wasmparser::Operator::BrIf { relative_depth: label } => {
 				counter.increment(instruction_cost)?;
 
 				// Label is a relative index into the control stack.
-				let active_index = counter.active_control_block_index().ok_or(())?;
-				let target_index = active_index.checked_sub(*label as usize).ok_or(())?;
+				let active_index = counter
+					.active_control_block_index()
+					.ok_or_else(|| anyhow!("active control block not exit"))?;
+				let target_index = active_index
+					.checked_sub(*label as usize)
+					.ok_or_else(|| anyhow!("index not found"))?;
 				counter.branch(cursor, &[target_index])?;
 			},
-			BrTable(br_table_data) => {
+			wasmparser::Operator::BrTable { table: br_table_data } => {
 				counter.increment(instruction_cost)?;
 
-				let active_index = counter.active_control_block_index().ok_or(())?;
-				let target_indices = [br_table_data.default]
+				let active_index = counter
+					.active_control_block_index()
+					.ok_or_else(|| anyhow!("index not found"))?;
+				let r = br_table_data.targets().collect::<wasmparser::Result<Vec<u32>>>().unwrap();
+				let target_indices = Vec::with_capacity(br_table_data.default() as usize)
 					.iter()
-					.chain(br_table_data.table.iter())
+					.chain(r.iter())
 					.map(|label| active_index.checked_sub(*label as usize))
 					.collect::<Option<Vec<_>>>()
-					.ok_or(())?;
+					.ok_or_else(|| anyhow!("to do check this error"))?;
 				counter.branch(cursor, &target_indices)?;
 			},
-			Return => {
+			wasmparser::Operator::Return => {
 				counter.increment(instruction_cost)?;
 				counter.branch(cursor, &[0])?;
 			},
@@ -616,37 +395,297 @@ fn determine_metered_blocks<R: Rules>(
 	Ok(counter.finalized_blocks)
 }
 
+/// Transforms a given module into one that charges gas for code to be executed by proxy of an
+/// imported gas metering function.
+///
+/// The output module imports a mutable global i64 $GAS_COUNTER_NAME ("gas_couner") from the
+/// specified module. The value specifies the amount of available units of gas. A new function
+/// doing gas accounting using this global is added to the module. Having the accounting logic
+/// in WASM lets us avoid the overhead of external calls.
+///
+/// The body of each function is divided into metered blocks, and the calls to charge gas are
+/// inserted at the beginning of every such block of code. A metered block is defined so that,
+/// unless there is a trap, either all of the instructions are executed or none are. These are
+/// similar to basic blocks in a control flow graph, except that in some cases multiple basic
+/// blocks can be merged into a single metered block. This is the case if any path through the
+/// control flow graph containing one basic block also contains another.
+///
+/// Charging gas is at the beginning of each metered block ensures that 1) all instructions
+/// executed are already paid for, 2) instructions that will not be executed are not charged for
+/// unless execution traps, and 3) the number of calls to "gas" is minimized. The corollary is that
+/// modules instrumented with this metering code may charge gas for instructions not executed in
+/// the event of a trap.
+///
+/// Additionally, each `memory.grow` instruction found in the module is instrumented to first make
+/// a call to charge gas for the additional pages requested. This cannot be done as part of the
+/// block level gas charges as the gas cost is not static and depends on the stack argument to
+/// `memory.grow`.
+///
+/// The above transformations are performed for every function body defined in the module. This
+/// function also rewrites all function indices references by code, table elements, etc., since
+/// the addition of an imported functions changes the indices of module-defined functions.
+///
+/// This routine runs in time linear in the size of the input module.
+///
+/// The function fails if the module contains any operation forbidden by gas rule set, returning
+/// the original module as an Err. Only one imported global is allowed per `gas_module_name`, the one corresponding to the gas spending measurement
+pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Result<Vec<u8>> {
+	// Injecting gas counting external
+	let mut module_info = ModuleInfo::new(raw_wasm)?;
+	add_gas_global_import(&mut module_info, gas_module_name)?;
+
+	// calculate actual global index of the imported definition
+	//    (subtract all imports that are NOT globals)
+	let gas_global = module_info.imported_globals_count - 1;
+	let total_func = module_info.function_map.len() as u32;
+
+	// We'll push the gas counter fuction after all other functions
+	let gas_func = total_func;
+
+	// grow_cnt_func is optional, so we put it after the gas function which always exists
+	let grow_cnt_func = total_func + 1;
+
+	let mut need_grow_counter = false;
+	let mut error = false;
+
+	// Updating calling addresses (all calls to function index >= `gas_func` should be incremented)
+	if let Some(code_section) = module_info.raw_sections.get_mut(&SectionId::Code.into()) {
+		let mut code_section_builder = wasm_encoder::CodeSection::new();
+		let mut code_sec_reader = CodeSectionReader::new(&code_section.data, 0)?;
+		while !code_sec_reader.eof() {
+			let func_body = code_sec_reader.read()?;
+			let mut func_builder = wasm_encoder::Function::new(copy_locals(&func_body)?);
+			let mut operator_reader = func_body.get_operators_reader()?;
+			while !operator_reader.eof() {
+				let op = operator_reader.read()?;
+				match op {
+					Operator::GlobalGet { global_index } =>
+						func_builder.instruction(&Instruction::GlobalGet(global_index + 1)),
+					Operator::GlobalSet { global_index } =>
+						func_builder.instruction(&Instruction::GlobalSet(global_index + 1)),
+					op => func_builder.instruction(&DefaultTranslator.translate_op(&op)?),
+				};
+			}
+
+			//todo rebuild function again, not good performance
+			match inject_counter(
+				&FunctionBody::new(0, &truncate_len_from_encoder(&func_builder)?),
+				rules,
+				gas_func,
+			) {
+				Ok(new_builder) => func_builder = new_builder,
+				Err(_) => {
+					error = true;
+					break
+				},
+			}
+			if rules.memory_grow_cost().enabled() {
+				let counter;
+				(func_builder, counter) = inject_grow_counter(
+					&FunctionBody::new(0, &truncate_len_from_encoder(&func_builder)?),
+					grow_cnt_func,
+				)?;
+				if counter > 0 {
+					need_grow_counter = true;
+				}
+			}
+			code_section_builder.function(&func_builder);
+		}
+		module_info.replace_section(SectionId::Code.into(), &code_section_builder)?;
+	}
+
+	if let Some(export_section) = module_info.raw_sections.get_mut(&SectionId::Export.into()) {
+		let mut export_sec_builder = ExportSection::new();
+		let mut export_sec_reader = ExportSectionReader::new(&export_section.data, 0)?;
+		while !export_sec_reader.eof() {
+			let export = export_sec_reader.read()?;
+			let mut global_index = export.index;
+			if let ExternalKind::Global = export.kind {
+				if global_index >= gas_global {
+					global_index += 1;
+				}
+			}
+			export_sec_builder.export(
+				export.name,
+				DefaultTranslator.translate_export_kind(export.kind)?,
+				global_index,
+			);
+		}
+	}
+
+	if let Some(import_section) = module_info.raw_sections.get_mut(&SectionId::Import.into()) {
+		// Take the imports for the gasglobal
+		let import_sec_reader = ImportSectionReader::new(&import_section.data, 0)?;
+		let gas_globals = import_sec_reader.into_iter().filter(|r| match r {
+			Ok(p) => match p.ty {
+				TypeRef::Global(g) => {
+					if p.module == gas_module_name && p.name == GAS_COUNTER_NAME {
+						if !g.mutable {
+							error = true
+						}
+
+						true
+					} else { false }
+				},
+
+				_ => false
+			},
+			_ => false
+		});
+
+		// Ensure there is only one gas global import
+		if gas_globals.count() != 1 {
+			return Err(anyhow!("expected 1 gas global"))
+		}
+	}
+
+	if let Some(ele_section) = module_info.raw_sections.get_mut(&SectionId::Element.into()) {
+		let ele_sec_reader = ElementSectionReader::new(&ele_section.data, 0)?;
+		for segment in ele_sec_reader {
+			let element_reader = segment?.items.get_items_reader()?;
+			for ele in element_reader {
+				if let ElementItem::Expr(expr) = ele? {
+					let operators = expr
+						.get_operators_reader()
+						.into_iter()
+						.collect::<wasmparser::Result<Vec<Operator>>>()
+						.unwrap();
+					if !check_offset_code(&operators) {
+						error = true;
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if let Some(data_section) = module_info.raw_sections.get_mut(&SectionId::Data.into()) {
+		let data_sec_reader = DataSectionReader::new(&data_section.data, 0)?;
+		for data in data_sec_reader {
+			if let DataKind::Active { memory_index: _, offset_expr: expr } = data?.kind {
+				let operators = expr
+					.get_operators_reader()
+					.into_iter()
+					.collect::<wasmparser::Result<Vec<Operator>>>()
+					.unwrap();
+				if !check_offset_code(&operators) {
+					error = true;
+					break
+				}
+			}
+		}
+	}
+
+	if error {
+		return Err(anyhow!("inject fail"))
+	}
+
+	let (func_t, gas_counter_func) = generate_gas_counter(gas_global);
+	module_info.add_func(func_t, &gas_counter_func)?;
+
+	if need_grow_counter {
+		if let Some((func, grow_counter_func)) = generate_grow_counter(rules, gas_func) {
+			module_info.add_func(func, &grow_counter_func)?;
+		}
+	}
+	Ok(module_info.bytes())
+}
+
+fn inject_grow_counter(
+	func_body: &FunctionBody,
+	grow_counter_func: u32,
+) -> Result<(Function, usize)> {
+	let mut counter = 0;
+	let mut new_func = Function::new(copy_locals(func_body)?);
+	let mut operator_reader = func_body.get_operators_reader()?;
+	while !operator_reader.eof() {
+		let op = operator_reader.read()?;
+		match op {
+			Operator::MemoryGrow { .. } => {
+				//todo Bulk memories
+				new_func.instruction(&wasm_encoder::Instruction::Call(grow_counter_func));
+				counter += 1;
+			},
+			op => {
+				new_func.instruction(&DefaultTranslator.translate_op(&op)?);
+			},
+		}
+	}
+	Ok((new_func, counter))
+}
+
+fn generate_grow_counter<R: Rules>(rules: &R, gas_func: u32) -> Option<(Type, Function)> {
+	let cost = match rules.memory_grow_cost() {
+		MemoryGrowCost::Free => return None,
+		MemoryGrowCost::Linear(val) => val.get(),
+	};
+
+	let mut func = wasm_encoder::Function::new(None);
+	func.instruction(&wasm_encoder::Instruction::LocalGet(0));
+	func.instruction(&wasm_encoder::Instruction::LocalGet(0));
+	func.instruction(&wasm_encoder::Instruction::I64ExtendI32U);
+	func.instruction(&wasm_encoder::Instruction::I64Const(cost as i64));
+	func.instruction(&wasm_encoder::Instruction::I64Mul);
+	func.instruction(&wasm_encoder::Instruction::Call(gas_func));
+	func.instruction(&wasm_encoder::Instruction::MemoryGrow(0));
+	func.instruction(&wasm_encoder::Instruction::End);
+	Some((
+		Type::Func(wasmparser::FuncType::new(
+			vec![wasmparser::ValType::I32],
+			vec![wasmparser::ValType::I32],
+		)),
+		func,
+	))
+}
+
+fn generate_gas_counter(gas_global: u32) -> (Type, Function) {
+	use wasm_encoder::Instruction::*;
+	let mut func = wasm_encoder::Function::new(None);
+	func.instruction(&GlobalGet(gas_global));
+	func.instruction(&LocalGet(0));
+	func.instruction(&I64Sub);
+	func.instruction(&GlobalSet(gas_global));
+	func.instruction(&GlobalGet(gas_global));
+	func.instruction(&I64Const(0));
+	func.instruction(&I64LtS);
+	func.instruction(&If(BlockType::Empty));
+	func.instruction(&Unreachable);
+	func.instruction(&End);
+	func.instruction(&End);
+	(Type::Func(FuncType::new(vec![wasmparser::ValType::I64], vec![])), func)
+}
+
 fn inject_counter<R: Rules>(
-	instructions: &mut elements::Instructions,
+	instructions: &wasmparser::FunctionBody,
 	rules: &R,
 	gas_func: u32,
-) -> Result<(), ()> {
+) -> Result<wasm_encoder::Function> {
 	let blocks = determine_metered_blocks(instructions, rules)?;
 	insert_metering_calls(instructions, blocks, gas_func)
 }
 
 // Then insert metering calls into a sequence of instructions given the block locations and costs.
 fn insert_metering_calls(
-	instructions: &mut elements::Instructions,
+	func_body: &wasmparser::FunctionBody,
 	blocks: Vec<MeteredBlock>,
 	gas_func: u32,
-) -> Result<(), ()> {
-	use parity_wasm::elements::Instruction::*;
-
+) -> Result<wasm_encoder::Function> {
+	let mut new_func = wasm_encoder::Function::new(copy_locals(func_body)?);
 	// To do this in linear time, construct a new vector of instructions, copying over old
 	// instructions one by one and injecting new ones as required.
-	let new_instrs_len = instructions.elements().len() + 2 * blocks.len();
-	let original_instrs =
-		mem::replace(instructions.elements_mut(), Vec::with_capacity(new_instrs_len));
-	let new_instrs = instructions.elements_mut();
-
 	let mut block_iter = blocks.into_iter().peekable();
-	for (original_pos, instr) in original_instrs.into_iter().enumerate() {
-		// If there the next block starts at this position, inject metering instructions.
+	let operators = func_body
+		.get_operators_reader()
+		.unwrap()
+		.into_iter()
+		.collect::<wasmparser::Result<Vec<Operator>>>()
+		.unwrap();
+	for (original_pos, instr) in operators.iter().enumerate() {
+		// If there the next block starts at this position, inject metering func_body.
 		let used_block = if let Some(block) = block_iter.peek() {
 			if block.start_pos == original_pos {
-				new_instrs.push(I64Const(block.cost as i64));
-				new_instrs.push(Call(gas_func));
+				new_func.instruction(&wasm_encoder::Instruction::I64Const(block.cost as i64));
+				new_func.instruction(&wasm_encoder::Instruction::Call(gas_func));
 				true
 			} else {
 				false
@@ -660,29 +699,83 @@ fn insert_metering_calls(
 		}
 
 		// Copy over the original instruction.
-		new_instrs.push(instr);
+		new_func.instruction(&DefaultTranslator.translate_op(instr)?);
 	}
 
 	if block_iter.next().is_some() {
-		return Err(())
+		return Err(anyhow!("block should be consume all"))
 	}
 
-	Ok(())
+	Ok(new_func)
+}
+
+fn add_gas_global_import(module: &mut ModuleInfo, gas_module_name: &str) -> Result<()> {
+	let mut import_decoder = ImportSection::new();
+	if let Some(import_sec) = module.raw_sections.get_mut(&SectionId::Import.into()) {
+		let import_sec_reader = ImportSectionReader::new(&import_sec.data, 0)?;
+		for import in import_sec_reader {
+			DefaultTranslator.translate_import(import?, &mut import_decoder)?;
+		}
+	}
+
+	import_decoder.import(
+		gas_module_name,
+		GAS_COUNTER_NAME,
+		wasm_encoder::GlobalType { val_type: ValType::I64, mutable: true },
+	);
+	module.imported_globals_count += 1;
+	module.replace_section(SectionId::Import.into(), &import_decoder)
+}
+
+fn check_offset_code(code: &[Operator]) -> bool {
+	matches!(code, [Operator::I32Const { value: _ }, Operator::End])
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use parity_wasm::{builder, elements, elements::Instruction::*, serialize};
+	use wasm_encoder::{Encode, Instruction::*};
+	use wasmparser::FunctionBody;
 
-	fn get_function_body(
-		module: &elements::Module,
+	fn check_expect_function_body(
+		raw_wasm: &[u8],
 		index: usize,
-	) -> Option<&[elements::Instruction]> {
-		module
-			.code_section()
-			.and_then(|code_section| code_section.bodies().get(index))
-			.map(|func_body| func_body.code().elements())
+		ops2: &[wasm_encoder::Instruction],
+	) -> bool {
+		let mut body_raw = vec![];
+		ops2.iter().for_each(|v| v.encode(&mut body_raw));
+		get_function_body(raw_wasm, index).eq(&body_raw)
+	}
+
+	fn get_function_body(raw_wasm: &[u8], index: usize) -> Vec<u8> {
+		let mut module = ModuleInfo::new(raw_wasm).unwrap();
+		let func_sec = module.raw_sections.get_mut(&SectionId::Code.into()).unwrap();
+		let func_bodies = wasmparser::CodeSectionReader::new(&func_sec.data, 0)
+			.unwrap()
+			.into_iter()
+			.collect::<wasmparser::Result<Vec<FunctionBody>>>()
+			.unwrap();
+
+		let func_body = func_bodies
+			.get(index)
+			.unwrap_or_else(|| panic!("module don't have function {}body", index));
+
+		let list = func_body
+			.get_operators_reader()
+			.unwrap()
+			.into_iter()
+			.map(|op| DefaultTranslator.translate_op(&op.unwrap()).unwrap())
+			.collect::<Vec<Instruction>>();
+
+		println!("{:?}", list);
+
+		let start = func_body.get_operators_reader().unwrap().original_position();
+		func_sec.data[start..func_body.range().end].to_vec()
+	}
+
+	fn parse_wat(source: &str) -> ModuleInfo {
+		let module_bytes = wat::parse_str(source).unwrap();
+		ModuleInfo::new(&module_bytes).unwrap()
 	}
 
 	#[test]
@@ -697,40 +790,43 @@ mod tests {
 			)"#,
 		);
 
-		let injected_module = inject(module, &ConstantCostRules::new(1, 10_000), "env").unwrap();
+		let raw_wasm = module.bytes();
+		let injected_raw_wasm =
+			inject(&raw_wasm, &ConstantCostRules::new(1, 10_000), "env").unwrap();
 
 		// global0 - gas
 		// global1 - orig global0
 		// func0 - main
 		// func1 - gas_counter
 		// func2 - grow_counter
+		assert!(check_expect_function_body(
+			&injected_raw_wasm,
+			0,
+			&[I64Const(2), Call(1), GlobalGet(1), Call(2), End,]
+		));
 
-		assert_eq!(
-			get_function_body(&injected_module, 0).unwrap(),
-			&vec![I64Const(2), Call(1), GetGlobal(1), Call(2), End][..]
-		);
-		// 1 is gas counter
-		assert_eq!(
-			get_function_body(&injected_module, 2).unwrap(),
-			&vec![
-				GetLocal(0),
-				GetLocal(0),
-				I64ExtendUI32,
+		// 2 is grow counter
+		assert!(check_expect_function_body(
+			&injected_raw_wasm,
+			2,
+			&[
+				LocalGet(0),
+				LocalGet(0),
+				I64ExtendI32U,
 				I64Const(10000),
 				I64Mul,
 				Call(1),
-				GrowMemory(0),
+				MemoryGrow(0),
 				End,
-			][..]
-		);
+			]
+		));
 
-		let binary = serialize(injected_module).expect("serialization failed");
-		wasmparser::validate(&binary).unwrap();
+		wasmparser::validate(&injected_raw_wasm).unwrap();
 	}
 
 	#[test]
 	fn grow_no_gas_no_track() {
-		let module = parse_wat(
+		let raw_wasm = parse_wat(
 			r"(module
 			(func (result i32)
 			  global.get 0
@@ -738,68 +834,53 @@ mod tests {
 			(global i32 (i32.const 42))
 			(memory 0 1)
 			)",
-		);
+		)
+		.bytes();
+		let injected_raw_wasm = inject(&raw_wasm, &ConstantCostRules::default(), "env").unwrap();
 
-		let injected_module = inject(module, &ConstantCostRules::default(), "env").unwrap();
+		assert!(check_expect_function_body(
+			&injected_raw_wasm,
+			0,
+			&[I64Const(2), Call(1), GlobalGet(1), MemoryGrow(0), End,]
+		));
 
-		assert_eq!(
-			get_function_body(&injected_module, 0).unwrap(),
-			&vec![I64Const(2), Call(1), GetGlobal(1), GrowMemory(0), End][..]
-		);
-
-		assert_eq!(injected_module.functions_space(), 2);
-
-		let binary = serialize(injected_module).expect("serialization failed");
-		wasmparser::validate(&binary).unwrap();
+		let injected_module = ModuleInfo::new(&injected_raw_wasm).unwrap();
+		assert_eq!(injected_module.num_functions(), 2);
+		wasmparser::validate(&injected_raw_wasm).unwrap();
 	}
 
 	#[test]
 	fn call_index() {
-		let module = builder::module()
-			.global()
-			.value_type()
-			.i32()
-			.build()
-			.function()
-			.signature()
-			.param()
-			.i32()
-			.build()
-			.body()
-			.build()
-			.build()
-			.function()
-			.signature()
-			.param()
-			.i32()
-			.build()
-			.body()
-			.with_instructions(elements::Instructions::new(vec![
-				Call(0),
-				If(elements::BlockType::NoResult),
-				Call(0),
-				Call(0),
-				Call(0),
-				Else,
-				Call(0),
-				Call(0),
-				End,
-				Call(0),
-				End,
-			]))
-			.build()
-			.build()
-			.build();
+		let raw_wasm = parse_wat(
+			r"(module
+				  (type (;0;) (func (result i32)))
+				  (func (;0;) (type 0) (result i32))
+				  (func (;1;) (type 0) (result i32)
+					call 0
+					if  ;; label = @1
+					  call 0
+					  call 0
+					  call 0
+					else
+					  call 0
+					  call 0
+					end
+					call 0
+				  )
+				  (global (;0;) i32 )
+				)",
+		)
+		.bytes();
+		let injected_raw_wasm = inject(&raw_wasm, &ConstantCostRules::default(), "env").unwrap();
 
-		let injected_module = inject(module, &ConstantCostRules::default(), "env").unwrap();
-
-		assert_eq!(
-			get_function_body(&injected_module, 1).unwrap(),
+		assert!(check_expect_function_body(
+			&injected_raw_wasm,
+			1,
 			&vec![
 				I64Const(3),
 				Call(2),
 				Call(0),
-				If(elements::BlockType::NoResult),
+				If(BlockType::Empty),
 				I64Const(3),
 				Call(2),
 				Call(0),
@@ -813,29 +894,23 @@ mod tests {
 				End,
 				Call(0),
 				End
-			][..]
-		);
-	}
-
-	fn parse_wat(source: &str) -> elements::Module {
-		let module_bytes = wat::parse_str(source).unwrap();
-		elements::deserialize_buffer(module_bytes.as_ref()).unwrap()
+			]
+		));
 	}
 
 	macro_rules! test_gas_counter_injection {
 		(name = $name:ident; input = $input:expr; expected = $expected:expr) => {
 			#[test]
 			fn $name() {
-				let input_module = parse_wat($input);
-				let expected_module = parse_wat($expected);
+				let input_wasm = parse_wat($input).bytes();
+				let expected_wasm = parse_wat($expected).bytes();
 
-				let injected_module = inject(input_module, &ConstantCostRules::default(), "env")
+				let injected_wasm = inject(&input_wasm, &ConstantCostRules::default(), "env")
 					.expect("inject_gas_counter call failed");
 
-				let actual_func_body = get_function_body(&injected_module, 0)
-					.expect("injected module must have a function body");
-				let expected_func_body = get_function_body(&expected_module, 0)
-					.expect("post-module must have a function body");
+				let actual_func_body = get_function_body(&injected_wasm, 0);
+
+				let expected_func_body = get_function_body(&expected_wasm, 0);
 
 				assert_eq!(actual_func_body, expected_func_body);
 			}
@@ -894,9 +969,55 @@ mod tests {
 			)
 		  )
 		"#;
-		let input_module = parse_wat(input);
-		let injected_module = inject(input_module, &ConstantCostRules::default(), "other")
+		let raw_wasm = parse_wat(input).bytes();
+		let injected_raw_wasm = inject(&raw_wasm, &ConstantCostRules::default(), "other")
 			.expect("inject_gas_counter call failed");
+		wasmparser::validate(&injected_raw_wasm).unwrap();
+
+		assert!(check_expect_function_body(
+			&injected_raw_wasm,
+			0,
+			&[
+				I64Const(11), Call(5), LocalGet(0), I32Const(64), LocalGet(1), I32Sub, I64ExtendI32U, I64Shl, LocalGet(0), LocalGet(1), I64ExtendI32U, I64ShrU, I64Or, End,
+			]
+		));
+
+		// 1 is gas counter
+		assert!(check_expect_function_body(
+			&injected_raw_wasm,
+			1,
+			&[
+				GlobalGet(2), // 2 imported globals, so gas one is third
+				LocalGet(0),
+				I64Sub,
+				GlobalSet(2),
+				GlobalGet(2),
+				I64Const(0),
+				I64LtS,
+				If(BlockType::Empty),
+				Unreachable,
+				End,
+				End
+			]
+		));
+	}
+
+	#[test]
+	fn test_user_gas_global_fails() {
+		let input = r#"
+		(module
+			(type (;0;) (func (param i64 i32) (result i64)))
+			(import "other" "gas_counter" (global (;0;) i64))
+			(func (;0;) (type 0) (param i64 i32) (result i64)
+			  local.get 0
+			  local.get 1
+			  i64.or
+			)
+		  )
+		"#;
+		let raw_wasm = parse_wat(input).bytes();
+		let estr = inject(&raw_wasm, &ConstantCostRules::default(), "other").unwrap_err().to_string();
+		assert!(estr == "expected 1 gas global", "error was {}", estr);
 	}
 
 	test_gas_counter_injection! {

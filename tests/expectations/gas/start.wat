@@ -4,7 +4,7 @@
   (type (;2;) (func (param i64)))
   (import "env" "ext_return" (func $ext_return (;0;) (type 0)))
   (import "env" "memory" (memory (;0;) 1 1))
-  (import "env" "gas_couner" (global (;0;) (mut i64)))
+  (import "env" "gas_counter" (global (;0;) (mut i64)))
   (func $start (;1;) (type 1)
     i64.const 4
     call 3

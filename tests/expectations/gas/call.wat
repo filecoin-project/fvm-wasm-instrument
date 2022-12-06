@@ -1,7 +1,7 @@
 (module
   (type (;0;) (func (param i32 i32) (result i32)))
   (type (;1;) (func (param i64)))
-  (import "env" "gas_couner" (global (;0;) (mut i64)))
+  (import "env" "gas_counter" (global (;0;) (mut i64)))
   (func $add_locals (;0;) (type 0) (param $x i32) (param $y i32) (result i32)
     (local $t i32)
     i64.const 5

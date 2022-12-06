@@ -1,7 +1,7 @@
 (module
   (type (;0;) (func))
   (type (;1;) (func (param i64)))
-  (import "env" "gas_couner" (global (;0;) (mut i64)))
+  (import "env" "gas_counter" (global (;0;) (mut i64)))
   (func (;0;) (type 0)
     i64.const 2
     call 2

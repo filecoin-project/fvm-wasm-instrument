@@ -1,7 +1,7 @@
 (module
   (type (;0;) (func (result i32)))
   (type (;1;) (func (param i64)))
-  (import "env" "gas_couner" (global (;0;) (mut i64)))
+  (import "env" "gas_counter" (global (;0;) (mut i64)))
   (func $fibonacci_with_break (;0;) (type 0) (result i32)
     (local $x i32) (local $y i32)
     i64.const 13

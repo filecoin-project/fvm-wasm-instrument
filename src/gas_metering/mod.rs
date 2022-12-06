@@ -519,8 +519,6 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
 		let gas_globals = import_sec_reader.into_iter().filter(|r| match r {
 			Ok(p) => match p.ty {
 				TypeRef::Global(g) => {
-					println!("{:?} {}", p, gas_module_name);
-
 					if p.module == gas_module_name && p.name == GAS_COUNTER_NAME {
 						if !g.mutable {
 							error = true

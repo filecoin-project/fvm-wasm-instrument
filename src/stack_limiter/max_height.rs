@@ -401,15 +401,32 @@ pub fn compute(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
 				},
 
 				//#[cfg(feature = "bulk")]
-				MemoryInit{..} |			//todo there are 12 instructions in wasmparser
+				MemoryInit{..} |
 				MemoryCopy{..} |
 				MemoryFill{..} |
 				TableInit{..} |
-				TableCopy{..} => {
+				TableCopy{..} |
+				TableFill{..} => {
 					stack.pop_values(3)?;
 				},
+				TableGrow{..} => {
+					stack.pop_values(2)?;
+					stack.push_values(1)?;
+				},
+				TableSize{..} => {
+					stack.push_values(1)?;
+				},
+				TableGet{..} => {
+					stack.pop_values(1)?;
+					stack.push_values(1)?;
+				},
+				TableSet{..} => {
+					stack.pop_values(2)?;
+				},
+
+
 				ElemDrop{..}|DataDrop{..}=> {},
-				_=>panic!("not support"),
+				_=>panic!("not supported"),
 			}
 	}
 

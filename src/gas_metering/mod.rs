@@ -1019,23 +1019,26 @@ mod tests {
         assert!(check_expect_function_body(
             &injected_raw_wasm,
             0,
-            &[I64Const(2), Call(1), GlobalGet(1), Call(2), End,]
-        ));
-
-        // 2 is grow counter
-        assert!(check_expect_function_body(
-            &injected_raw_wasm,
-            2,
             &[
-                LocalGet(0),
-                LocalGet(0),
-                I64ExtendI32U,
-                I64Const(10000),
-                I64Mul,
-                Call(1),
-                MemoryGrow(0),
-                End,
-            ]
+				I64Const(2),
+				Call(1), // gas charge
+
+				GlobalGet(1), // original code
+
+				// <dynamic charge>
+
+				LocalTee(0),
+				LocalGet(0),
+				I64ExtendI32U,
+				I64Const(10000),
+				I64Mul,
+				Call(1),
+
+				// </dynamic charge>
+				MemoryGrow(0), // original code
+
+				End,
+			]
         ));
 
         wasmparser::validate(&injected_raw_wasm).unwrap();

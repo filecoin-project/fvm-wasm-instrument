@@ -7,7 +7,7 @@
 //! instructions is correct. This is done by constructing a control flow graph and exhaustively
 //! searching through all paths, which may take exponential time in the size of the function body in
 //! the worst case.
-
+/*
 use super::{ConstantCostRules, MeteredBlock, Rules};
 use anyhow::{anyhow, Result};
 use std::collections::BTreeMap as Map;
@@ -201,7 +201,7 @@ fn build_control_flow_graph(
             }
             End => {
                 let closing_frame = stack.pop()
-					.expect("module is valid by pre-condition; ends correspond to control stack frames; qed");
+                    .expect("module is valid by pre-condition; ends correspond to control stack frames; qed");
 
                 graph.new_forward_edge(active_node_id, closing_frame.exit_node);
                 graph.set_first_instr_pos(closing_frame.exit_node, cursor + 1);
@@ -386,3 +386,4 @@ mod tests {
         }
     }
 }
+*/

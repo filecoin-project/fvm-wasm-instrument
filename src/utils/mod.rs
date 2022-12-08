@@ -439,6 +439,7 @@ pub fn copy_locals(
 }
 
 //todo unable to get function encoder body directly, remove this after option wasmparser
+// todo this looks like maybe not needed?
 pub fn truncate_len_from_encoder(func_builder: &dyn wasm_encoder::Encode) -> Result<Vec<u8>> {
     let mut d = vec![];
     func_builder.encode(&mut d);

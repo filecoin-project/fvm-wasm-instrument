@@ -14,14 +14,15 @@ use crate::utils::{
 };
 use alloc::{vec, vec::Vec};
 use anyhow::{anyhow, Result};
-use core::{cmp::min, mem, num::NonZeroU64};
+use core::{cmp::min, mem};
+use std::num::NonZeroU32;
 use wasm_encoder::{
     BlockType, ExportSection, Function, ImportSection, Instruction, SectionId, ValType,
 };
 use wasmparser::{
     CodeSectionReader, DataKind, DataSectionReader, ElementItem, ElementSectionReader,
-    ExportSectionReader, ExternalKind, FuncType, FunctionBody, ImportSectionReader, Operator,
-    SectionReader, Type, TypeRef,
+    ExportSectionReader, ExternalKind, FuncType, FunctionBody, FunctionSectionReader,
+    ImportSectionReader, Operator, SectionReader, Type, TypeRef, TypeSectionReader,
 };
 
 pub const GAS_COUNTER_NAME: &str = "gas_counter";
@@ -30,46 +31,24 @@ pub const GAS_COUNTER_NAME: &str = "gas_counter";
 pub trait Rules {
     /// Returns the cost for the passed `instruction`.
     ///
-    /// Returning `None` makes the gas instrumention end with an error. This is meant
-    /// as a way to have a partial rule set where any instruction that is not specifed
-    /// is considered as forbidden.
-    fn instruction_cost(&self, instruction: &Operator) -> Option<u64>;
+    /// Returning an error can be used as a way to indicat that an instruction
+    /// is forbidden
+    fn instruction_cost(&self, instruction: &Operator) -> Result<InstructionCost>;
 
-    /// Returns the costs for growing the memory using the `memory.grow` instruction.
-    ///
-    /// Please note that these costs are in addition to the costs specified by `instruction_cost`
-    /// for the `memory.grow` instruction. Those are meant as dynamic costs which take the
-    /// amount of pages that the memory is grown by into consideration. This is not possible
-    /// using `instruction_cost` because those costs depend on the stack and must be injected as
-    /// code into the function calling `memory.grow`. Therefore returning anything but
-    /// [`MemoryGrowCost::Free`] introduces some overhead to the `memory.grow` instruction.
-    fn memory_grow_cost(&self) -> MemoryGrowCost;
+    // todo
+    //fn gas_charge_cost() -> Result<u64>;
 }
 
-/// Dynamic costs for memory growth.
+/// Dynamic costs instructions.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub enum MemoryGrowCost {
-    /// Skip per page charge.
-    ///
-    /// # Note
-    ///
-    /// This makes sense when the amount of pages that a module is allowed to use is limited
-    /// to a rather small number by static validation. In that case it is viable to
-    /// benchmark the costs of `memory.grow` as the worst case (growing to to the maximum
-    /// number of pages).
-    Free,
-    /// Charge the specified amount for each page that the memory is grown by.
-    Linear(NonZeroU64),
-}
+pub enum InstructionCost {
+    /// Charge fixed amount per instruction.
+    Fixed(u64),
 
-impl MemoryGrowCost {
-    /// True iff memory growths code needs to be injected.
-    fn enabled(&self) -> bool {
-        match self {
-            Self::Free => false,
-            Self::Linear(_) => true,
-        }
-    }
+    /// Charge the specified amount of base miligas, plus miligas based on the
+    /// last item on the stack. For memory.grow this is the number of pages.
+    /// For memory.copy this is the number of bytes to copy.
+    Linear(u64, NonZeroU32),
 }
 
 /// A type that implements [`Rules`] so that every instruction costs the same.
@@ -83,7 +62,7 @@ impl MemoryGrowCost {
 /// created by benchmarking.
 pub struct ConstantCostRules {
     instruction_cost: u64,
-    memory_grow_cost: u64,
+    memory_grow_cost: u32,
 }
 
 impl ConstantCostRules {
@@ -91,7 +70,7 @@ impl ConstantCostRules {
     ///
     /// Uses `instruction_cost` for every instruction and `memory_grow_cost` to dynamically
     /// meter the memory growth instruction.
-    pub fn new(instruction_cost: u64, memory_grow_cost: u64) -> Self {
+    pub fn new(instruction_cost: u64, memory_grow_cost: u32) -> Self {
         Self {
             instruction_cost,
             memory_grow_cost,
@@ -110,12 +89,12 @@ impl Default for ConstantCostRules {
 }
 
 impl Rules for ConstantCostRules {
-    fn instruction_cost(&self, _: &Operator) -> Option<u64> {
-        Some(self.instruction_cost)
-    }
-
-    fn memory_grow_cost(&self) -> MemoryGrowCost {
-        NonZeroU64::new(self.memory_grow_cost).map_or(MemoryGrowCost::Free, MemoryGrowCost::Linear)
+    fn instruction_cost(&self, i: &Operator) -> Result<InstructionCost> {
+        match i {
+            Operator::MemoryGrow { .. } => Ok(NonZeroU32::new(self.memory_grow_cost)
+                .map_or(InstructionCost::Fixed(1), |c| InstructionCost::Linear(1, c))),
+            _ => Ok(InstructionCost::Fixed(self.instruction_cost)),
+        }
     }
 }
 
@@ -165,6 +144,17 @@ struct MeteredBlock {
     start_pos: usize,
     /// Sum of costs of all instructions until end of the block.
     cost: u64,
+}
+
+/// An instruction that requires Linear gas charge to be applied
+#[derive(Debug, Clone)]
+struct MeteredInstruction {
+    /// Index of the instruction.
+    pos: usize,
+    /// Cost per unit. Multiplied by top of stack to get the actual cost
+    unit_cost: u32,
+    /// Type of the last item on the stack when the function is called
+    param_type: ValType,
 }
 
 /// Counter is used to manage state during the gas metering algorithm implemented by
@@ -340,12 +330,19 @@ impl Counter {
 fn determine_metered_blocks<R: Rules>(
     func_body: &wasmparser::FunctionBody,
     rules: &R,
-) -> Result<Vec<MeteredBlock>> {
+) -> Result<(Vec<MeteredBlock>, Vec<MeteredInstruction>)> {
     use wasmparser::Operator::*;
 
     let mut counter = Counter::new();
     // Begin an implicit function (i.e. `func...end`) block.
     counter.begin_control_block(0, false);
+
+    // set if the previous instruction was a I32Const. Used to precompute linear
+    // instruction costs where there are sequences of instructions like
+    // `[..]; i32.const 123; memory.copy`
+    let mut last_const: Option<i32> = None;
+
+    let mut metered_instrs = Vec::new();
 
     let operators = func_body
         .get_operators_reader()
@@ -354,9 +351,28 @@ fn determine_metered_blocks<R: Rules>(
         .collect::<wasmparser::Result<Vec<Operator>>>()
         .unwrap();
     for (cursor, instruction) in operators.iter().enumerate() {
-        let instruction_cost = rules
-            .instruction_cost(instruction)
-            .ok_or_else(|| anyhow!("check gas rule fail"))?;
+        let instruction_cost = match rules.instruction_cost(&instruction)? {
+            InstructionCost::Fixed(c) => c,
+            InstructionCost::Linear(base, cost_per) => {
+                if let Some(stack_top) = last_const {
+                    // note: doesn't overflow because both sides are u32
+                    // todo negative carefull
+                    base + ((stack_top as u64) * (cost_per.get() as u64))
+                } else {
+                    let stack_top = instruction_stack_top_type(instruction)?;
+
+                    metered_instrs.push(MeteredInstruction {
+                        pos: cursor,
+                        unit_cost: cost_per.get(),
+                        param_type: stack_top,
+                    });
+                    // linear part will get charged at runtime (this instruction will get replaced
+                    // with a call to gas-charging func)
+                    base
+                }
+            }
+        };
+
         match instruction {
             Block { ty: _ } => {
                 counter.increment(instruction_cost)?;
@@ -423,17 +439,26 @@ fn determine_metered_blocks<R: Rules>(
                 counter.increment(instruction_cost)?;
                 counter.branch(cursor, &[0])?;
             }
+            wasmparser::Operator::I32Const { value } => {
+                last_const = Some(*value);
+                counter.increment(instruction_cost)?;
+
+                // continue so that we don't clear last_const below
+                continue;
+            }
             _ => {
                 // An ordinal non control flow instruction increments the cost of the current block.
                 counter.increment(instruction_cost)?;
             }
         }
+
+        last_const = None;
     }
 
     counter
         .finalized_blocks
         .sort_unstable_by_key(|block| block.start_pos);
-    Ok(counter.finalized_blocks)
+    Ok((counter.finalized_blocks, metered_instrs))
 }
 
 /// Transforms a given module into one that charges gas for code to be executed by proxy of an
@@ -484,23 +509,58 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
     // We'll push the gas counter fuction after all other functions
     let gas_func = total_func;
 
-    // grow_cnt_func is optional, so we put it after the gas function which always exists
-    let grow_cnt_func = total_func + 1;
-
-    let mut need_grow_counter = false;
     let mut error = false;
+
+    // Read types which are needed in later steps
+    let mut functype_param_counts = Vec::new();
+    if let Some(type_section) = module_info.raw_sections.get_mut(&SectionId::Type.into()) {
+        let type_sec_reader = TypeSectionReader::new(&type_section.data, 0)?;
+
+        for t in type_sec_reader {
+            let Type::Func(ft) = t?;
+            let count = ft.params().len() as u32;
+
+            functype_param_counts.push(count);
+        }
+    }
+
+    // we will need function parameter counts when adding temporary locals for dynamic
+    // gas charges
+    let mut func_param_counts: Vec<u32> = Vec::new();
+    if let Some(func_section) = module_info
+        .raw_sections
+        .get_mut(&SectionId::Function.into())
+    {
+        let func_sec_reader = FunctionSectionReader::new(&func_section.data, 0)?;
+
+        for type_res in func_sec_reader {
+            let type_idx = type_res?;
+            let params = *functype_param_counts
+                .get(type_idx as usize)
+                .ok_or(anyhow!("functype missing"))?;
+			func_param_counts.push(params);
+        }
+    }
 
     // Updating calling addresses (all calls to function index >= `gas_func` should be incremented)
     if let Some(code_section) = module_info.raw_sections.get_mut(&SectionId::Code.into()) {
         let mut code_section_builder = wasm_encoder::CodeSection::new();
         let mut code_sec_reader = CodeSectionReader::new(&code_section.data, 0)?;
+
+        let mut param_counts = func_param_counts.into_iter();
+
+        // For each function
         while !code_sec_reader.eof() {
             let func_body = code_sec_reader.read()?;
             let mut func_builder = wasm_encoder::Function::new(copy_locals(&func_body)?);
+
+            // Go through instructions, increment all global gets
+            // todo this is wrong, can have imports at lower index??
             let mut operator_reader = func_body.get_operators_reader()?;
             while !operator_reader.eof() {
                 let op = operator_reader.read()?;
                 match op {
+                    // todo if > gas global??
                     Operator::GlobalGet { global_index } => {
                         func_builder.instruction(&Instruction::GlobalGet(global_index + 1))
                     }
@@ -511,10 +571,17 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
                 };
             }
 
-            //todo rebuild function again, not good performance
+            let param_count = param_counts
+                .next()
+                .ok_or(anyhow!("out of func defs for param counts"))?;
+
+            // Determine metered blocks and dynamically priced instructions
+            // Rewrite function bodies with code block gas tracking instrumented
+            // TODO: merge the second step into the loop above which is already rewriting functions
             match inject_counter(
                 &FunctionBody::new(0, &truncate_len_from_encoder(&func_builder)?),
                 rules,
+                param_count,
                 gas_func,
             ) {
                 Ok(new_builder) => func_builder = new_builder,
@@ -523,16 +590,7 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
                     break;
                 }
             }
-            if rules.memory_grow_cost().enabled() {
-                let counter;
-                (func_builder, counter) = inject_grow_counter(
-                    &FunctionBody::new(0, &truncate_len_from_encoder(&func_builder)?),
-                    grow_cnt_func,
-                )?;
-                if counter > 0 {
-                    need_grow_counter = true;
-                }
-            }
+
             code_section_builder.function(&func_builder);
         }
         module_info.replace_section(SectionId::Code.into(), &code_section_builder)?;
@@ -633,60 +691,91 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
     let (func_t, gas_counter_func) = generate_gas_counter(gas_global);
     module_info.add_func(func_t, &gas_counter_func)?;
 
-    if need_grow_counter {
-        if let Some((func, grow_counter_func)) = generate_grow_counter(rules, gas_func) {
-            module_info.add_func(func, &grow_counter_func)?;
-        }
-    }
     Ok(module_info.bytes())
 }
 
-fn inject_grow_counter(
-    func_body: &FunctionBody,
-    grow_counter_func: u32,
-) -> Result<(Function, usize)> {
+/*fn inject_dynamic_counters(func_body: &FunctionBody, dyn_funcs: &mut HashMap<Operator, u32>) -> Result<(Function, usize)> {
     let mut counter = 0;
     let mut new_func = Function::new(copy_locals(func_body)?);
     let mut operator_reader = func_body.get_operators_reader()?;
     while !operator_reader.eof() {
         let op = operator_reader.read()?;
-        match op {
-            Operator::MemoryGrow { .. } => {
-                //todo Bulk memories
-                new_func.instruction(&wasm_encoder::Instruction::Call(grow_counter_func));
-                counter += 1;
-            }
-            op => {
-                new_func.instruction(&DefaultTranslator.translate_op(&op)?);
-            }
+        if let Some(func_idx ) = dyn_funcs.get(op) {
+            *op = Operator::Call{ function_index: func_idx };
+            counter += 1;
         }
     }
     Ok((new_func, counter))
-}
+}*/
+/*
+fn generate_dynamic_counters<R: Rules>(rules: &R, tableTypes: Vec<ValType>, gas_func: u32, dyn_funcs: &HashMap<Operator<'_>, u32>) -> Result<Vec<(Type, wasm_encoder::Function)>> {
+    let mut funcs_sorted: Vec<(&Operator, &u32)> = dyn_funcs.into_iter().collect();
+    funcs_sorted.sort_by(|(_, lk), (_, rk)| lk.cmp(rk));
 
-fn generate_grow_counter<R: Rules>(rules: &R, gas_func: u32) -> Option<(Type, Function)> {
-    let cost = match rules.memory_grow_cost() {
-        MemoryGrowCost::Free => return None,
-        MemoryGrowCost::Linear(val) => val.get(),
-    };
+    let out = Vec::new();
 
-    let mut func = wasm_encoder::Function::new(None);
-    func.instruction(&wasm_encoder::Instruction::LocalGet(0));
-    func.instruction(&wasm_encoder::Instruction::LocalGet(0));
-    func.instruction(&wasm_encoder::Instruction::I64ExtendI32U);
-    func.instruction(&wasm_encoder::Instruction::I64Const(cost as i64));
-    func.instruction(&wasm_encoder::Instruction::I64Mul);
-    func.instruction(&wasm_encoder::Instruction::Call(gas_func));
-    func.instruction(&wasm_encoder::Instruction::MemoryGrow(0));
-    func.instruction(&wasm_encoder::Instruction::End);
-    Some((
-        Type::Func(wasmparser::FuncType::new(
-            vec![wasmparser::ValType::I32],
-            vec![wasmparser::ValType::I32],
-        )),
-        func,
-    ))
+    for (instr, _) in funcs_sorted {
+        let cost = match rules.instruction_cost(instr)? {
+            InstructionCost::Linear(_, val) => val.get(),
+            _ => return Err(anyhow!("dynamic instruction cost wasn't linear"))
+        };
+
+        let (params, rets) = instruction_signature(instr, tableTypes)?;
+
+        let mut counter_body = wasm_encoder::Function::new(None);
+
+        // first get all params back onto the stack
+        for (i, _) in params.into_iter().enumerate() {
+            counter_body.instruction(&wasm_encoder::Instruction::LocalGet(i as u32));
+        }
+
+        // get the dynamic param back onto the stack
+        counter_body.instruction(&wasm_encoder::Instruction::LocalGet(params.len() as u32-1));
+
+        // cast the dynamic param if needed
+        match params.last().ok_or(anyhow!("dynamic functions must have params"))? {
+            ValType::I32 => counter_body.instruction(&wasm_encoder::Instruction::I64ExtendI32U), // todo test negative sign
+            _ => return Err(anyhow!("unsupported dynamic param type")),
+        };
+
+        counter_body.instruction(&wasm_encoder::Instruction::I64Const(cost as i64));
+        counter_body.instruction(&wasm_encoder::Instruction::I64Mul);
+        counter_body.instruction(&wasm_encoder::Instruction::Call(gas_func));
+        counter_body.instruction(&DefaultTranslator.translate_op(instr)?);
+        counter_body.instruction(&wasm_encoder::Instruction::End);
+
+/*
+        const 234
+        call gas_func
+        [...]
+        mem.copy
+
+        const 234
+        call gas_func
+        [...]
+
+        dup
+        maybeCastToI64
+        const [linear cost]
+        mul
+        call gas_func
+        mem.copy
+
+
+
+         */
+
+        out.push((
+            Type::Func(wasmparser::FuncType::new(
+                &params.to_vec(),
+                &rets.to_vec(),
+            )),
+            counter_body,
+        ));
+    }
+    return Ok(out)
 }
+*/
 
 fn generate_gas_counter(gas_global: u32) -> (Type, Function) {
     use wasm_encoder::Instruction::*;
@@ -711,22 +800,50 @@ fn generate_gas_counter(gas_global: u32) -> (Type, Function) {
 fn inject_counter<R: Rules>(
     instructions: &wasmparser::FunctionBody,
     rules: &R,
+    param_count: u32,
     gas_func: u32,
 ) -> Result<wasm_encoder::Function> {
-    let blocks = determine_metered_blocks(instructions, rules)?;
-    insert_metering_calls(instructions, blocks, gas_func)
+    let (blocks, metered_instrs) = determine_metered_blocks(instructions, rules)?;
+    insert_metering_calls(instructions, blocks, metered_instrs, param_count, gas_func)
 }
 
 // Then insert metering calls into a sequence of instructions given the block locations and costs.
 fn insert_metering_calls(
     func_body: &wasmparser::FunctionBody,
     blocks: Vec<MeteredBlock>,
+    instructions: Vec<MeteredInstruction>,
+    param_count: u32,
     gas_func: u32,
 ) -> Result<wasm_encoder::Function> {
-    let mut new_func = wasm_encoder::Function::new(copy_locals(func_body)?);
+    // collect value types on which we will be doing dynamic gas math.
+    // We need those for temp locals because wasm has no other way to duplicate stack items..
+
+    // todo in the future when we want to do linear gas cost on instructions where
+    //  the last parameter doesn't happen to always be i32 this will need to be smarter
+    let mut has_i32_temp = false;
+    for i in &instructions {
+        match i.param_type {
+            ValType::I32 => has_i32_temp = true,
+            _ => return Err(anyhow!("dynamic gas charges only supported on I32 params")),
+        }
+    }
+
+    let mut locals = copy_locals(func_body)?;
+    let temp_local_idx = param_count
+        + (&locals)
+            .into_iter()
+            .fold(0 as u32, |acc, (count, _)| acc + count);
+
+    if has_i32_temp {
+        locals.push((1, ValType::I32));
+    }
+
     // To do this in linear time, construct a new vector of instructions, copying over old
     // instructions one by one and injecting new ones as required.
+    let mut new_func = wasm_encoder::Function::new(locals);
+
     let mut block_iter = blocks.into_iter().peekable();
+    let mut instr_iter = instructions.into_iter().peekable();
     let operators = func_body
         .get_operators_reader()
         .unwrap()
@@ -735,28 +852,49 @@ fn insert_metering_calls(
         .unwrap();
     for (original_pos, instr) in operators.iter().enumerate() {
         // If there the next block starts at this position, inject metering func_body.
-        let used_block = if let Some(block) = block_iter.peek() {
+        if let Some(block) = block_iter.peek() {
             if block.start_pos == original_pos {
                 new_func.instruction(&wasm_encoder::Instruction::I64Const(block.cost as i64));
                 new_func.instruction(&wasm_encoder::Instruction::Call(gas_func));
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
 
-        if used_block {
-            block_iter.next();
+                block_iter.next();
+            }
         }
 
+        // if this instruction requires dynamic gas charge calculation, inject that code
+        if let Some(metered_instr) = instr_iter.peek() {
+            if metered_instr.pos == original_pos {
+                // duplicate stack top
+                new_func.instruction(&wasm_encoder::Instruction::LocalTee(temp_local_idx));
+                new_func.instruction(&wasm_encoder::Instruction::LocalGet(temp_local_idx));
+
+                // cast to I64 if needed
+                // note: today we only expect i32, so cast always needed
+                new_func.instruction(&wasm_encoder::Instruction::I64ExtendI32U);
+
+                // calculate gas charge
+                new_func.instruction(&wasm_encoder::Instruction::I64Const(
+                    metered_instr.unit_cost as i64,
+                ));
+                new_func.instruction(&wasm_encoder::Instruction::I64Mul);
+
+                // TODO TODO: Check negative numbers!!!
+
+                // charge gas!
+                new_func.instruction(&wasm_encoder::Instruction::Call(gas_func));
+
+                instr_iter.next();
+            }
+        }
         // Copy over the original instruction.
         new_func.instruction(&DefaultTranslator.translate_op(instr)?);
     }
 
     if block_iter.next().is_some() {
-        return Err(anyhow!("block should be consume all"));
+        return Err(anyhow!("metered blocks should be all consumed"));
+    }
+    if instr_iter.next().is_some() {
+        return Err(anyhow!("metered instructions should be all consumed"));
     }
 
     Ok(new_func)
@@ -785,6 +923,23 @@ fn add_gas_global_import(module: &mut ModuleInfo, gas_module_name: &str) -> Resu
 
 fn check_offset_code(code: &[Operator]) -> bool {
     matches!(code, [Operator::I32Const { value: _ }, Operator::End])
+}
+
+fn instruction_stack_top_type(instr: &Operator<'_>) -> Result<ValType> {
+    use wasmparser::Operator::*;
+
+    match instr {
+        MemoryGrow { .. }
+        | TableGrow { .. }
+        | MemoryInit { .. }
+        | MemoryCopy { .. }
+        | MemoryFill { .. }
+        | TableInit { .. }
+        | TableCopy { .. }
+        | TableFill { .. } => Ok(ValType::I32),
+
+        _ => Err(anyhow!("instruction not supported")),
+    }
 }
 
 #[cfg(test)]

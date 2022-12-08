@@ -31,7 +31,7 @@ pub const GAS_COUNTER_NAME: &str = "gas_counter";
 pub trait Rules {
     /// Returns the cost for the passed `instruction`.
     ///
-    /// Returning an error can be used as a way to indicat that an instruction
+    /// Returning an error can be used as a way to indicate that an instruction
     /// is forbidden
     fn instruction_cost(&self, instruction: &Operator) -> Result<InstructionCost>;
 

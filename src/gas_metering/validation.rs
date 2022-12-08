@@ -167,7 +167,6 @@ fn build_control_flow_graph(
             ))?,
         };
 
-        //.ok_or_else(|| anyhow!("gas rule for instruction {:?} not found", &instruction))?;
         match instruction {
             Block { ty: _ } => {
                 graph.increment_actual_cost(active_node_id, instruction_cost);

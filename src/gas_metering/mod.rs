@@ -351,7 +351,7 @@ fn determine_metered_blocks<R: Rules>(
         .collect::<wasmparser::Result<Vec<Operator>>>()
         .unwrap();
     for (cursor, instruction) in operators.iter().enumerate() {
-        let instruction_cost = match rules.instruction_cost(&instruction)? {
+        let instruction_cost = match rules.instruction_cost(instruction)? {
             InstructionCost::Fixed(c) => c,
             InstructionCost::Linear(base, cost_per) => {
                 if let Some(stack_top) = last_const {
@@ -543,7 +543,7 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
             let type_idx = type_res?;
             let params = *functype_param_counts
                 .get(type_idx as usize)
-                .ok_or(anyhow!("functype missing"))?;
+                .ok_or_else(|| anyhow!("functype missing"))?;
             func_param_counts.push(params);
         }
     }
@@ -579,7 +579,7 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
 
             let param_count = param_counts
                 .next()
-                .ok_or(anyhow!("out of func defs for param counts"))?;
+                .ok_or_else(|| anyhow!("out of func defs for param counts"))?;
 
             // Determine metered blocks and dynamically priced instructions
             // Rewrite function bodies with code block gas tracking instrumented
@@ -752,10 +752,7 @@ fn insert_metering_calls(
     }
 
     let mut locals = copy_locals(func_body)?;
-    let temp_local_idx = param_count
-        + (&locals)
-            .into_iter()
-            .fold(0 as u32, |acc, (count, _)| acc + count);
+    let temp_local_idx = param_count + (&locals).iter().fold(0, |acc, (count, _)| acc + count);
 
     if has_i32_temp {
         locals.push((1, ValType::I32));
@@ -967,7 +964,6 @@ mod tests {
         // global1 - orig global0
         // func0 - main
         // func1 - gas_counter
-        // func2 - grow_counter
         assert!(check_expect_function_body(
             &injected_raw_wasm,
             0,
@@ -1016,7 +1012,6 @@ mod tests {
         // global1 - orig global0
         // func0 - main
         // func1 - gas_counter
-        // func2 - grow_counter
         assert!(check_expect_function_body(
             &injected_raw_wasm,
             0,

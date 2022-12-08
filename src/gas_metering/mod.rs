@@ -1044,6 +1044,82 @@ mod tests {
         wasmparser::validate(&injected_raw_wasm).unwrap();
     }
 
+	#[test]
+	fn simple_grow_two() {
+		// this test checks dynamic counter for instructions with different const param
+
+		pub struct TestRules {}
+		impl Rules for TestRules {
+			fn instruction_cost(&self, i: &Operator) -> Result<InstructionCost> {
+				Ok(match i {
+					Operator::MemoryGrow{..} => InstructionCost::Linear(1, NonZeroU32::new(10).unwrap()),
+					Operator::MemoryInit{..} => InstructionCost::Linear(3,  NonZeroU32::new(12).unwrap()),
+					_ => InstructionCost::Fixed(1),
+				})
+			}
+		}
+
+		let module = parse_wat(
+			r#"(module
+			(global i32 (i32.const 42))
+			(memory 0 1)
+			(func (param i32) (result i32)
+			  local.get 0
+			  global.get 0
+			  i32.mul
+			  memory.grow
+			  (memory.init 1
+				  (i32.const 16)
+				  (i32.const 0)
+				  (i32.mul (i32.const 7) (i32.const 1)))
+			  (memory.init 0
+				  (i32.const 8)
+				  (i32.const 0)
+				  (i32.mul (i32.const 2) (i32.const 1))))
+			(data "gm")
+			(data "goodbye"))"#,
+		);
+
+		let raw_wasm = module.bytes();
+		wasmparser::validate(&raw_wasm).unwrap();
+
+		let injected_raw_wasm =
+			inject(&raw_wasm, &TestRules{}, "env").unwrap();
+
+
+		// global0 - gas
+		// global1 - orig global0
+		// func0 - main
+		// func1 - gas_counter
+
+		assert!(check_expect_function_body(
+			&injected_raw_wasm,
+			0,
+			&[
+				I64Const(20), Call(1), // gas
+
+				LocalGet(0), GlobalGet(1), I32Mul,
+
+				LocalTee(1), LocalGet(1), I64ExtendI32U, I64Const(10), I64Mul, Call(1), // gas
+				MemoryGrow(0),
+
+				I32Const(16), I32Const(0), I32Const(7), I32Const(1), I32Mul,
+
+				LocalTee(1), LocalGet(1), I64ExtendI32U, I64Const(12), I64Mul, Call(1), // gas
+				MemoryInit { mem: 0, data: 1 },
+
+				I32Const(8), I32Const(0), I32Const(2), I32Const(1), I32Mul,
+
+				LocalTee(1), LocalGet(1), I64ExtendI32U, I64Const(12), I64Mul, Call(1), // gas
+				MemoryInit { mem: 0, data: 0 },
+
+				End
+			]
+		));
+
+		wasmparser::validate(&injected_raw_wasm).unwrap();
+	}
+
     #[test]
     fn grow_no_gas_no_track() {
         let raw_wasm = parse_wat(

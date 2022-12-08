@@ -538,7 +538,7 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
             let params = *functype_param_counts
                 .get(type_idx as usize)
                 .ok_or(anyhow!("functype missing"))?;
-			func_param_counts.push(params);
+            func_param_counts.push(params);
         }
     }
 
@@ -1020,47 +1020,46 @@ mod tests {
             &injected_raw_wasm,
             0,
             &[
-				I64Const(2),
-				Call(1), // gas charge
-
-				GlobalGet(1), // original code
-
-				// <dynamic charge>
-
-				LocalTee(0),
-				LocalGet(0),
-				I64ExtendI32U,
-				I64Const(10000),
-				I64Mul,
-				Call(1),
-
-				// </dynamic charge>
-				MemoryGrow(0), // original code
-
-				End,
-			]
+                I64Const(2),
+                Call(1), // gas charge
+                GlobalGet(1), // original code
+                // <dynamic charge>
+                LocalTee(0),
+                LocalGet(0),
+                I64ExtendI32U,
+                I64Const(10000),
+                I64Mul,
+                Call(1),
+                // </dynamic charge>
+                MemoryGrow(0), // original code
+                End,
+            ]
         ));
 
         wasmparser::validate(&injected_raw_wasm).unwrap();
     }
 
-	#[test]
-	fn simple_grow_two() {
-		// this test checks dynamic counter for instructions with different const param
+    #[test]
+    fn simple_grow_two() {
+        // this test checks dynamic counter for instructions with different const param
 
-		pub struct TestRules {}
-		impl Rules for TestRules {
-			fn instruction_cost(&self, i: &Operator) -> Result<InstructionCost> {
-				Ok(match i {
-					Operator::MemoryGrow{..} => InstructionCost::Linear(1, NonZeroU32::new(10).unwrap()),
-					Operator::MemoryInit{..} => InstructionCost::Linear(3,  NonZeroU32::new(12).unwrap()),
-					_ => InstructionCost::Fixed(1),
-				})
-			}
-		}
+        pub struct TestRules {}
+        impl Rules for TestRules {
+            fn instruction_cost(&self, i: &Operator) -> Result<InstructionCost> {
+                Ok(match i {
+                    Operator::MemoryGrow { .. } => {
+                        InstructionCost::Linear(1, NonZeroU32::new(10).unwrap())
+                    }
+                    Operator::MemoryInit { .. } => {
+                        InstructionCost::Linear(3, NonZeroU32::new(12).unwrap())
+                    }
+                    _ => InstructionCost::Fixed(1),
+                })
+            }
+        }
 
-		let module = parse_wat(
-			r#"(module
+        let module = parse_wat(
+            r#"(module
 			(global i32 (i32.const 42))
 			(memory 0 1)
 			(func (param i32) (result i32)
@@ -1078,47 +1077,64 @@ mod tests {
 				  (i32.mul (i32.const 2) (i32.const 1))))
 			(data "gm")
 			(data "goodbye"))"#,
-		);
+        );
 
-		let raw_wasm = module.bytes();
-		wasmparser::validate(&raw_wasm).unwrap();
+        let raw_wasm = module.bytes();
+        wasmparser::validate(&raw_wasm).unwrap();
 
-		let injected_raw_wasm =
-			inject(&raw_wasm, &TestRules{}, "env").unwrap();
+        let injected_raw_wasm = inject(&raw_wasm, &TestRules {}, "env").unwrap();
 
+        // global0 - gas
+        // global1 - orig global0
+        // func0 - main
+        // func1 - gas_counter
 
-		// global0 - gas
-		// global1 - orig global0
-		// func0 - main
-		// func1 - gas_counter
+        assert!(check_expect_function_body(
+            &injected_raw_wasm,
+            0,
+            &[
+                I64Const(20),
+                Call(1), // gas
+                LocalGet(0),
+                GlobalGet(1),
+                I32Mul,
+                LocalTee(1),
+                LocalGet(1),
+                I64ExtendI32U,
+                I64Const(10),
+                I64Mul,
+                Call(1), // gas
+                MemoryGrow(0),
+                I32Const(16),
+                I32Const(0),
+                I32Const(7),
+                I32Const(1),
+                I32Mul,
+                LocalTee(1),
+                LocalGet(1),
+                I64ExtendI32U,
+                I64Const(12),
+                I64Mul,
+                Call(1), // gas
+                MemoryInit { mem: 0, data: 1 },
+                I32Const(8),
+                I32Const(0),
+                I32Const(2),
+                I32Const(1),
+                I32Mul,
+                LocalTee(1),
+                LocalGet(1),
+                I64ExtendI32U,
+                I64Const(12),
+                I64Mul,
+                Call(1), // gas
+                MemoryInit { mem: 0, data: 0 },
+                End
+            ]
+        ));
 
-		assert!(check_expect_function_body(
-			&injected_raw_wasm,
-			0,
-			&[
-				I64Const(20), Call(1), // gas
-
-				LocalGet(0), GlobalGet(1), I32Mul,
-
-				LocalTee(1), LocalGet(1), I64ExtendI32U, I64Const(10), I64Mul, Call(1), // gas
-				MemoryGrow(0),
-
-				I32Const(16), I32Const(0), I32Const(7), I32Const(1), I32Mul,
-
-				LocalTee(1), LocalGet(1), I64ExtendI32U, I64Const(12), I64Mul, Call(1), // gas
-				MemoryInit { mem: 0, data: 1 },
-
-				I32Const(8), I32Const(0), I32Const(2), I32Const(1), I32Mul,
-
-				LocalTee(1), LocalGet(1), I64ExtendI32U, I64Const(12), I64Mul, Call(1), // gas
-				MemoryInit { mem: 0, data: 0 },
-
-				End
-			]
-		));
-
-		wasmparser::validate(&injected_raw_wasm).unwrap();
-	}
+        wasmparser::validate(&injected_raw_wasm).unwrap();
+    }
 
     #[test]
     fn grow_no_gas_no_track() {

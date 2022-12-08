@@ -9,10 +9,10 @@
 //! the worst case.
 
 use super::{ConstantCostRules, MeteredBlock, Rules};
+use crate::gas_metering::InstructionCost;
 use anyhow::{anyhow, Result};
 use std::collections::BTreeMap as Map;
 use wasmparser::Operator;
-use crate::gas_metering::InstructionCost;
 
 /// An ID for a node in a ControlFlowGraph.
 type NodeId = usize;
@@ -159,13 +159,15 @@ fn build_control_flow_graph(
             graph.increment_charged_cost(active_node_id, next_metered_block.cost);
         }
 
-        let instruction_cost = match rules.instruction_cost(instruction){
-			Ok(InstructionCost::Fixed(c)) => c,
-			 _ => Err(anyhow!("gas rule for instruction {:?} not found or not supported", &instruction))?,
-		};
+        let instruction_cost = match rules.instruction_cost(instruction) {
+            Ok(InstructionCost::Fixed(c)) => c,
+            _ => Err(anyhow!(
+                "gas rule for instruction {:?} not found or not supported",
+                &instruction
+            ))?,
+        };
 
-
-            //.ok_or_else(|| anyhow!("gas rule for instruction {:?} not found", &instruction))?;
+        //.ok_or_else(|| anyhow!("gas rule for instruction {:?} not found", &instruction))?;
         match instruction {
             Block { ty: _ } => {
                 graph.increment_actual_cost(active_node_id, instruction_cost);

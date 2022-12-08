@@ -355,8 +355,14 @@ fn determine_metered_blocks<R: Rules>(
             InstructionCost::Fixed(c) => c,
             InstructionCost::Linear(base, cost_per) => {
                 if let Some(stack_top) = last_const {
+                    if stack_top < 0 {
+                        // See "NOTE(negative bulk instruction arg)" below
+                        return Err(anyhow!(
+                            "linearly priced instructions are illegal with negative arguments"
+                        ));
+                    }
+
                     // note: doesn't overflow because both sides are u32
-                    // todo negative carefull
                     base + ((stack_top as u64) * (cost_per.get() as u64))
                 } else {
                     let stack_top = instruction_stack_top_type(instruction)?;
@@ -694,89 +700,6 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
     Ok(module_info.bytes())
 }
 
-/*fn inject_dynamic_counters(func_body: &FunctionBody, dyn_funcs: &mut HashMap<Operator, u32>) -> Result<(Function, usize)> {
-    let mut counter = 0;
-    let mut new_func = Function::new(copy_locals(func_body)?);
-    let mut operator_reader = func_body.get_operators_reader()?;
-    while !operator_reader.eof() {
-        let op = operator_reader.read()?;
-        if let Some(func_idx ) = dyn_funcs.get(op) {
-            *op = Operator::Call{ function_index: func_idx };
-            counter += 1;
-        }
-    }
-    Ok((new_func, counter))
-}*/
-/*
-fn generate_dynamic_counters<R: Rules>(rules: &R, tableTypes: Vec<ValType>, gas_func: u32, dyn_funcs: &HashMap<Operator<'_>, u32>) -> Result<Vec<(Type, wasm_encoder::Function)>> {
-    let mut funcs_sorted: Vec<(&Operator, &u32)> = dyn_funcs.into_iter().collect();
-    funcs_sorted.sort_by(|(_, lk), (_, rk)| lk.cmp(rk));
-
-    let out = Vec::new();
-
-    for (instr, _) in funcs_sorted {
-        let cost = match rules.instruction_cost(instr)? {
-            InstructionCost::Linear(_, val) => val.get(),
-            _ => return Err(anyhow!("dynamic instruction cost wasn't linear"))
-        };
-
-        let (params, rets) = instruction_signature(instr, tableTypes)?;
-
-        let mut counter_body = wasm_encoder::Function::new(None);
-
-        // first get all params back onto the stack
-        for (i, _) in params.into_iter().enumerate() {
-            counter_body.instruction(&wasm_encoder::Instruction::LocalGet(i as u32));
-        }
-
-        // get the dynamic param back onto the stack
-        counter_body.instruction(&wasm_encoder::Instruction::LocalGet(params.len() as u32-1));
-
-        // cast the dynamic param if needed
-        match params.last().ok_or(anyhow!("dynamic functions must have params"))? {
-            ValType::I32 => counter_body.instruction(&wasm_encoder::Instruction::I64ExtendI32U), // todo test negative sign
-            _ => return Err(anyhow!("unsupported dynamic param type")),
-        };
-
-        counter_body.instruction(&wasm_encoder::Instruction::I64Const(cost as i64));
-        counter_body.instruction(&wasm_encoder::Instruction::I64Mul);
-        counter_body.instruction(&wasm_encoder::Instruction::Call(gas_func));
-        counter_body.instruction(&DefaultTranslator.translate_op(instr)?);
-        counter_body.instruction(&wasm_encoder::Instruction::End);
-
-/*
-        const 234
-        call gas_func
-        [...]
-        mem.copy
-
-        const 234
-        call gas_func
-        [...]
-
-        dup
-        maybeCastToI64
-        const [linear cost]
-        mul
-        call gas_func
-        mem.copy
-
-
-
-         */
-
-        out.push((
-            Type::Func(wasmparser::FuncType::new(
-                &params.to_vec(),
-                &rets.to_vec(),
-            )),
-            counter_body,
-        ));
-    }
-    return Ok(out)
-}
-*/
-
 fn generate_gas_counter(gas_global: u32) -> (Type, Function) {
     use wasm_encoder::Instruction::*;
     let mut func = wasm_encoder::Function::new(None);
@@ -867,6 +790,24 @@ fn insert_metering_calls(
                 // duplicate stack top
                 new_func.instruction(&wasm_encoder::Instruction::LocalTee(temp_local_idx));
                 new_func.instruction(&wasm_encoder::Instruction::LocalGet(temp_local_idx));
+                new_func.instruction(&wasm_encoder::Instruction::LocalGet(temp_local_idx));
+
+                // check that the argument is positive
+                //
+                // NOTE(negative bulk instruction arg):
+                // right now this instrumentation is mostly meant for bulk memory instructions
+                // In the formal spec instructions are NOT required to trap when the "count" argument
+                // is negative, and if the spec is followed exactly, those instructions may take
+                // very long to trap with a negative argument.
+                //
+                // e.g. see https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-init-x
+                // To guard against this we explicitly trap when we see a negative argument.
+
+                new_func.instruction(&wasm_encoder::Instruction::I32Const(0));
+                new_func.instruction(&wasm_encoder::Instruction::I32LtS);
+                new_func.instruction(&wasm_encoder::Instruction::If(BlockType::Empty));
+                new_func.instruction(&wasm_encoder::Instruction::Unreachable);
+                new_func.instruction(&wasm_encoder::Instruction::End);
 
                 // cast to I64 if needed
                 // note: today we only expect i32, so cast always needed
@@ -877,8 +818,6 @@ fn insert_metering_calls(
                     metered_instr.unit_cost as i64,
                 ));
                 new_func.instruction(&wasm_encoder::Instruction::I64Mul);
-
-                // TODO TODO: Check negative numbers!!!
 
                 // charge gas!
                 new_func.instruction(&wasm_encoder::Instruction::Call(gas_func));
@@ -929,11 +868,24 @@ fn instruction_stack_top_type(instr: &Operator<'_>) -> Result<ValType> {
     use wasmparser::Operator::*;
 
     match instr {
-        MemoryGrow { .. }
+        // Note: may not trap on negative arg
+		// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-grow
+		MemoryGrow { .. }
+
         | TableGrow { .. }
-        | MemoryInit { .. }
+
+		// Note: may not trap on negative arg, and/or may be very expensive
+		// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-init-x
+		| MemoryInit { .. }
+
+		// Note: may not trap on negative arg
+		// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-grow
         | MemoryCopy { .. }
-        | MemoryFill { .. }
+
+		// Note: may not trap on negative arg, and/or may be very expensive
+		// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-fill
+		| MemoryFill { .. }
+
         | TableInit { .. }
         | TableCopy { .. }
         | TableFill { .. } => Ok(ValType::I32),
@@ -1021,11 +973,17 @@ mod tests {
             0,
             &[
                 I64Const(2),
-                Call(1), // gas charge
+                Call(1),      // gas charge
                 GlobalGet(1), // original code
                 // <dynamic charge>
                 LocalTee(0),
                 LocalGet(0),
+                LocalGet(0),
+                I32Const(0),
+                I32LtS,
+                If(BlockType::Empty),
+                Unreachable,
+                End,
                 I64ExtendI32U,
                 I64Const(10000),
                 I64Mul,
@@ -1037,6 +995,58 @@ mod tests {
         ));
 
         wasmparser::validate(&injected_raw_wasm).unwrap();
+    }
+
+    #[test]
+    fn grow_const() {
+        let module = parse_wat(
+            r#"(module
+			(func (result i32)
+			  i32.const 10
+			  memory.grow)
+			(memory 0 1)
+			)"#,
+        );
+
+        let raw_wasm = module.bytes();
+        let injected_raw_wasm =
+            inject(&raw_wasm, &ConstantCostRules::new(1, 10_000), "env").unwrap();
+
+        // global0 - gas
+        // global1 - orig global0
+        // func0 - main
+        // func1 - gas_counter
+        // func2 - grow_counter
+        assert!(check_expect_function_body(
+            &injected_raw_wasm,
+            0,
+            &[
+                I64Const(100002),
+                Call(1), // gas charge
+                I32Const(10),
+                MemoryGrow(0),
+                End,
+            ]
+        ));
+
+        wasmparser::validate(&injected_raw_wasm).unwrap();
+    }
+
+    #[test]
+    fn grow_const_neg_fail() {
+        let module = parse_wat(
+            r#"(module
+			(func (result i32)
+			  i32.const -10
+			  memory.grow)
+			(memory 0 1)
+			)"#,
+        );
+
+        let raw_wasm = module.bytes();
+        wasmparser::validate(&raw_wasm).unwrap();
+
+        assert!(inject(&raw_wasm, &ConstantCostRules::new(1, 10_000), "env").is_err())
     }
 
     #[test]
@@ -1094,16 +1104,22 @@ mod tests {
             0,
             &[
                 I64Const(20),
-                Call(1), // gas
+                Call(1),
                 LocalGet(0),
                 GlobalGet(1),
                 I32Mul,
                 LocalTee(1),
                 LocalGet(1),
+                LocalGet(1),
+                I32Const(0),
+                I32LtS,
+                If(BlockType::Empty),
+                Unreachable,
+                End,
                 I64ExtendI32U,
                 I64Const(10),
                 I64Mul,
-                Call(1), // gas
+                Call(1),
                 MemoryGrow(0),
                 I32Const(16),
                 I32Const(0),
@@ -1112,10 +1128,16 @@ mod tests {
                 I32Mul,
                 LocalTee(1),
                 LocalGet(1),
+                LocalGet(1),
+                I32Const(0),
+                I32LtS,
+                If(BlockType::Empty),
+                Unreachable,
+                End,
                 I64ExtendI32U,
                 I64Const(12),
                 I64Mul,
-                Call(1), // gas
+                Call(1),
                 MemoryInit { mem: 0, data: 1 },
                 I32Const(8),
                 I32Const(0),
@@ -1124,10 +1146,16 @@ mod tests {
                 I32Mul,
                 LocalTee(1),
                 LocalGet(1),
+                LocalGet(1),
+                I32Const(0),
+                I32LtS,
+                If(BlockType::Empty),
+                Unreachable,
+                End,
                 I64ExtendI32U,
                 I64Const(12),
                 I64Mul,
-                Call(1), // gas
+                Call(1),
                 MemoryInit { mem: 0, data: 0 },
                 End
             ]

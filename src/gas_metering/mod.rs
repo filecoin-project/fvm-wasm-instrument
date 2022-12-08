@@ -980,10 +980,8 @@ mod tests {
     fn gas_charge_charge() {
         pub struct TestRules {}
         impl Rules for TestRules {
-            fn instruction_cost(&self, i: &Operator) -> Result<InstructionCost> {
-                Ok(match i {
-                    _ => InstructionCost::Fixed(1),
-                })
+            fn instruction_cost(&self, _: &Operator) -> Result<InstructionCost> {
+                Ok(InstructionCost::Fixed(1))
             }
 
             fn gas_charge_cost(&self) -> u64 {

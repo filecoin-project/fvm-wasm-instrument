@@ -153,8 +153,6 @@ struct MeteredInstruction {
     pos: usize,
     /// Cost per unit. Multiplied by top of stack to get the actual cost
     unit_cost: u32,
-    /// Type of the last item on the stack when the function is called
-    param_type: ValType,
 }
 
 /// Counter is used to manage state during the gas metering algorithm implemented by
@@ -365,12 +363,22 @@ fn determine_metered_blocks<R: Rules>(
                     // note: doesn't overflow because both sides are u32
                     base + ((stack_top as u64) * (cost_per.get() as u64))
                 } else {
-                    let stack_top = instruction_stack_top_type(instruction)?;
+                    // Code in insert_metering_calls below needs to create temporary locals in order
+                    // to be able to duplicate stack items. For simplicity/performance that code
+                    // hard-codes i32 valtype. This is fine as all instructions for which dynamic
+                    // pricing makes sense have i32 stack top.
+                    //
+                    // If the need ever arises to support more value types, this check will need to
+                    // be removed, and the logic creating temporary locals in insert_metering_calls
+                    // will need to be made smarter.
+                    match instruction_stack_top_type(instruction)? {
+						ValType::I32 => {},
+						_ => return Err(anyhow!("linearly priced instructions with non-i32 stack top aren't supported yet")),
+					};
 
                     metered_instrs.push(MeteredInstruction {
                         pos: cursor,
                         unit_cost: cost_per.get(),
-                        param_type: stack_top,
                     });
                     // linear part will get charged at runtime (this instruction will get replaced
                     // with a call to gas-charging func)
@@ -741,15 +749,11 @@ fn insert_metering_calls(
     // collect value types on which we will be doing dynamic gas math.
     // We need those for temp locals because wasm has no other way to duplicate stack items..
 
-    // todo in the future when we want to do linear gas cost on instructions where
+    // todo: if in the future when we want to do linear gas cost on instructions where
     //  the last parameter doesn't happen to always be i32 this will need to be smarter
-    let mut has_i32_temp = false;
-    for i in &instructions {
-        match i.param_type {
-            ValType::I32 => has_i32_temp = true,
-            _ => return Err(anyhow!("dynamic gas charges only supported on I32 params")),
-        }
-    }
+    // note: code in determine_metered_blocks already enforces that all `instructions`
+    // have i32 stack top.
+    let has_i32_temp = !instructions.is_empty();
 
     let mut locals = copy_locals(func_body)?;
     let temp_local_idx = param_count + (&locals).iter().fold(0, |acc, (count, _)| acc + count);
@@ -785,8 +789,13 @@ fn insert_metering_calls(
         if let Some(metered_instr) = instr_iter.peek() {
             if metered_instr.pos == original_pos {
                 // duplicate stack top
+                // save into temp local
                 new_func.instruction(&wasm_encoder::Instruction::LocalTee(temp_local_idx));
+
+                // one copy to do math for gas charge
                 new_func.instruction(&wasm_encoder::Instruction::LocalGet(temp_local_idx));
+
+                // second copy for negative check
                 new_func.instruction(&wasm_encoder::Instruction::LocalGet(temp_local_idx));
 
                 // check that the argument is positive

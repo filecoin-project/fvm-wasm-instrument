@@ -182,8 +182,8 @@ pub fn compute(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
         }
         match opcode {
             Nop => {}
-            Block { ty } | Loop { ty } | If { ty } => {
-                let end_arity = if ty == BlockType::Empty { 0 } else { 1 };
+            Block { blockty } | Loop { blockty } | If { blockty } => {
+                let end_arity = if blockty == BlockType::Empty { 0 } else { 1 };
                 let branch_arity = if let Loop { .. } = opcode {
                     0
                 } else {
@@ -232,11 +232,11 @@ pub fn compute(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
                 // Push values back.
                 stack.push_values(target_arity)?;
             }
-            BrTable { table } => {
-                let arity_of_default = stack.frame(table.default())?.branch_arity;
+            BrTable { targets } => {
+                let arity_of_default = stack.frame(targets.default())?.branch_arity;
 
                 // Check that all jump targets have an equal arities.
-                for target in table.targets() {
+                for target in targets.targets() {
                     let arity = stack.frame(target?)?.branch_arity;
                     if arity != arity_of_default {
                         return Err(anyhow!("arity of all jump-targets must be equal"));
@@ -575,7 +575,7 @@ pub fn compute(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
             | I8x16MinU { .. }
             | I8x16MaxS { .. }
             | I8x16MaxU { .. }
-            | I8x16RoundingAverageU { .. }
+            | I8x16AvgrU { .. }
             | I16x8ExtAddPairwiseI8x16S { .. }
             | I16x8ExtAddPairwiseI8x16U { .. }
             | I16x8Abs { .. }
@@ -603,7 +603,7 @@ pub fn compute(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
             | I16x8MinU { .. }
             | I16x8MaxS { .. }
             | I16x8MaxU { .. }
-            | I16x8RoundingAverageU { .. }
+            | I16x8AvgrU { .. }
             | I16x8ExtMulLowI8x16S { .. }
             | I16x8ExtMulHighI8x16S { .. }
             | I16x8ExtMulLowI8x16U { .. }

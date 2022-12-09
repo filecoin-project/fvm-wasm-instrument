@@ -48,6 +48,9 @@ pub enum InstructionCost {
     /// Charge the specified amount of base miligas, plus miligas based on the
     /// last item on the stack. For memory.grow this is the number of pages.
     /// For memory.copy this is the number of bytes to copy.
+    ///
+    /// Note: in order to make overflows impossible, the second (cost per unit)
+    /// value must be in range 0x1 ~ 0x7fff_ffff.
     Linear(u64, NonZeroU32),
 }
 
@@ -352,6 +355,11 @@ fn determine_metered_blocks<R: Rules>(
         let instruction_cost = match rules.instruction_cost(instruction)? {
             InstructionCost::Fixed(c) => c,
             InstructionCost::Linear(base, cost_per) => {
+                // Enforce that cost per unit fits in 31 bits
+                if cost_per.get() >= 0x8000_0000 {
+                    return Err(anyhow!("cost per unit excedes the 0x80000000 limit"));
+                }
+
                 if let Some(stack_top) = last_const {
                     if stack_top < 0 {
                         // See "NOTE(negative bulk instruction arg)" below
@@ -795,11 +803,6 @@ fn insert_metering_calls(
                 // one copy to do math for gas charge
                 new_func.instruction(&wasm_encoder::Instruction::LocalGet(temp_local_idx));
 
-                // second copy for negative check
-                new_func.instruction(&wasm_encoder::Instruction::LocalGet(temp_local_idx));
-
-                // check that the argument is positive
-                //
                 // NOTE(negative bulk instruction arg):
                 // right now this instrumentation is mostly meant for bulk memory instructions
                 // In the formal spec instructions are NOT required to trap when the "count" argument
@@ -807,13 +810,8 @@ fn insert_metering_calls(
                 // very long to trap with a negative argument.
                 //
                 // e.g. see https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-init-x
-                // To guard against this we explicitly trap when we see a negative argument.
-
-                new_func.instruction(&wasm_encoder::Instruction::I32Const(0));
-                new_func.instruction(&wasm_encoder::Instruction::I32LtS);
-                new_func.instruction(&wasm_encoder::Instruction::If(BlockType::Empty));
-                new_func.instruction(&wasm_encoder::Instruction::Unreachable);
-                new_func.instruction(&wasm_encoder::Instruction::End);
+                // To guard against this we use unsigned extend instructions.
+                // This means that e.g. -1_i32 becomes 0x0000_0000_ffff_ffff
 
                 // cast to I64 if needed
                 // note: today we only expect i32, so cast always needed
@@ -983,12 +981,6 @@ mod tests {
                 // <dynamic charge>
                 LocalTee(0),
                 LocalGet(0),
-                LocalGet(0),
-                I32Const(0),
-                I32LtS,
-                If(BlockType::Empty),
-                Unreachable,
-                End,
                 I64ExtendI32U,
                 I64Const(10000),
                 I64Mul,
@@ -1114,12 +1106,6 @@ mod tests {
                 I32Mul,
                 LocalTee(1),
                 LocalGet(1),
-                LocalGet(1),
-                I32Const(0),
-                I32LtS,
-                If(BlockType::Empty),
-                Unreachable,
-                End,
                 I64ExtendI32U,
                 I64Const(10),
                 I64Mul,
@@ -1132,12 +1118,6 @@ mod tests {
                 I32Mul,
                 LocalTee(1),
                 LocalGet(1),
-                LocalGet(1),
-                I32Const(0),
-                I32LtS,
-                If(BlockType::Empty),
-                Unreachable,
-                End,
                 I64ExtendI32U,
                 I64Const(12),
                 I64Mul,
@@ -1150,12 +1130,6 @@ mod tests {
                 I32Mul,
                 LocalTee(1),
                 LocalGet(1),
-                LocalGet(1),
-                I32Const(0),
-                I32LtS,
-                If(BlockType::Empty),
-                Unreachable,
-                End,
                 I64ExtendI32U,
                 I64Const(12),
                 I64Mul,

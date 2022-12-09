@@ -35,8 +35,13 @@ pub trait Rules {
     /// is forbidden
     fn instruction_cost(&self, instruction: &Operator) -> Result<InstructionCost>;
 
-    // todo
-    //fn gas_charge_cost() -> Result<u64>;
+    /// Returns cost for each call to the gas charging function
+    fn gas_charge_cost(&self) -> u64;
+
+    /// Returns cost of calculating linear cost at runtime. Does not apply to
+    /// instructions cost of which can be statically determined (linearly priced
+    /// ops proceded by a const). Added to gas_charge_cost on dynamic charges
+    fn linear_calc_cost(&self) -> u64;
 }
 
 /// Dynamic costs instructions.
@@ -98,6 +103,14 @@ impl Rules for ConstantCostRules {
                 .map_or(InstructionCost::Fixed(1), |c| InstructionCost::Linear(1, c))),
             _ => Ok(InstructionCost::Fixed(self.instruction_cost)),
         }
+    }
+
+    fn gas_charge_cost(&self) -> u64 {
+        0
+    }
+
+    fn linear_calc_cost(&self) -> u64 {
+        0
     }
 }
 
@@ -390,7 +403,7 @@ fn determine_metered_blocks<R: Rules>(
                     });
                     // linear part will get charged at runtime (this instruction will get replaced
                     // with a call to gas-charging func)
-                    base
+                    base + rules.gas_charge_cost() + rules.linear_calc_cost()
                 }
             }
         };
@@ -743,7 +756,16 @@ fn inject_counter<R: Rules>(
     gas_func: u32,
 ) -> Result<wasm_encoder::Function> {
     let (blocks, metered_instrs) = determine_metered_blocks(instructions, rules)?;
-    insert_metering_calls(instructions, blocks, metered_instrs, param_count, gas_func)
+    let charge_cost = rules.gas_charge_cost();
+
+    insert_metering_calls(
+        instructions,
+        blocks,
+        metered_instrs,
+        param_count,
+        gas_func,
+        charge_cost,
+    )
 }
 
 // Then insert metering calls into a sequence of instructions given the block locations and costs.
@@ -753,6 +775,7 @@ fn insert_metering_calls(
     instructions: Vec<MeteredInstruction>,
     param_count: u32,
     gas_func: u32,
+    charge_cost: u64,
 ) -> Result<wasm_encoder::Function> {
     // collect value types on which we will be doing dynamic gas math.
     // We need those for temp locals because wasm has no other way to duplicate stack items..
@@ -786,7 +809,9 @@ fn insert_metering_calls(
         // If there the next block starts at this position, inject metering func_body.
         if let Some(block) = block_iter.peek() {
             if block.start_pos == original_pos {
-                new_func.instruction(&wasm_encoder::Instruction::I64Const(block.cost as i64));
+                new_func.instruction(&wasm_encoder::Instruction::I64Const(
+                    (charge_cost + block.cost) as i64,
+                ));
                 new_func.instruction(&wasm_encoder::Instruction::Call(gas_func));
 
                 block_iter.next();
@@ -952,6 +977,47 @@ mod tests {
     }
 
     #[test]
+    fn gas_charge_charge() {
+        pub struct TestRules {}
+        impl Rules for TestRules {
+            fn instruction_cost(&self, _: &Operator) -> Result<InstructionCost> {
+                Ok(InstructionCost::Fixed(1))
+            }
+
+            fn gas_charge_cost(&self) -> u64 {
+                13
+            }
+            fn linear_calc_cost(&self) -> u64 {
+                99
+            }
+        }
+
+        let module = parse_wat(
+            r#"(module
+			(func (result i32)
+			  i32.const 10)
+			(memory 0 1)
+			)"#,
+        );
+
+        let raw_wasm = module.bytes();
+        let injected_raw_wasm = inject(&raw_wasm, &TestRules {}, "env").unwrap();
+
+        assert!(check_expect_function_body(
+            &injected_raw_wasm,
+            0,
+            &[
+                I64Const(14), // 1 + 13
+                Call(1),      // gas charge
+                I32Const(10),
+                End,
+            ]
+        ));
+
+        wasmparser::validate(&injected_raw_wasm).unwrap();
+    }
+
+    #[test]
     fn simple_grow() {
         let module = parse_wat(
             r#"(module
@@ -987,6 +1053,118 @@ mod tests {
                 Call(1),
                 // </dynamic charge>
                 MemoryGrow(0), // original code
+                End,
+            ]
+        ));
+
+        wasmparser::validate(&injected_raw_wasm).unwrap();
+    }
+
+    #[test]
+    fn gas_charge_charge_const_linear() {
+        pub struct TestRules {}
+        impl Rules for TestRules {
+            fn instruction_cost(&self, i: &Operator) -> Result<InstructionCost> {
+                Ok(match i {
+                    Operator::MemoryGrow { .. } => {
+                        InstructionCost::Linear(17, NonZeroU32::new(7).unwrap())
+                    }
+                    _ => InstructionCost::Fixed(3),
+                })
+            }
+
+            fn gas_charge_cost(&self) -> u64 {
+                13
+            }
+            fn linear_calc_cost(&self) -> u64 {
+                5
+            }
+        }
+
+        let module = parse_wat(
+            r#"(module
+			(func (result i32)
+			  i32.const 10
+			  memory.grow 0)
+			(memory 0 1)
+			)"#,
+        );
+
+        let raw_wasm = module.bytes();
+        let injected_raw_wasm = inject(&raw_wasm, &TestRules {}, "env").unwrap();
+
+        assert!(check_expect_function_body(
+            &injected_raw_wasm,
+            0,
+            &[
+                I64Const(103), // 3*1 + 17 + 10*7 + 13*1
+                Call(1),       // gas charge
+                I32Const(10),
+                MemoryGrow(0),
+                End,
+            ]
+        ));
+
+        wasmparser::validate(&injected_raw_wasm).unwrap();
+    }
+
+    #[test]
+    fn gas_charge_charge_dyn_linear() {
+        pub struct TestRules {}
+        impl Rules for TestRules {
+            fn instruction_cost(&self, i: &Operator) -> Result<InstructionCost> {
+                Ok(match i {
+                    Operator::MemoryGrow { .. } => {
+                        InstructionCost::Linear(17, NonZeroU32::new(7).unwrap())
+                    }
+                    _ => InstructionCost::Fixed(3),
+                })
+            }
+
+            fn gas_charge_cost(&self) -> u64 {
+                13
+            }
+            fn linear_calc_cost(&self) -> u64 {
+                5
+            }
+        }
+
+        let module = parse_wat(
+            r#"(module
+			(func (result i32)
+			  i32.const 10
+			  i32.const 1
+			  i32.mul
+			  memory.grow 0)
+			(memory 0 1)
+			)"#,
+        );
+
+        let raw_wasm = module.bytes();
+        let injected_raw_wasm = inject(&raw_wasm, &TestRules {}, "env").unwrap();
+
+        assert!(check_expect_function_body(
+            &injected_raw_wasm,
+            0,
+            &[
+                I64Const(57), // 3*3 + 17 + 13*2 + 5
+                Call(1),      // gas charge
+                I32Const(10),
+                I32Const(1),
+                I32Mul,
+                LocalTee(0),
+                LocalGet(0),
+                LocalGet(0),
+                I32Const(0),
+                I32LtS,
+                If(BlockType::Empty),
+                Unreachable,
+                End,
+                I64ExtendI32U,
+                I64Const(7),
+                I64Mul,
+                Call(1),
+                MemoryGrow(0),
                 End,
             ]
         ));
@@ -1061,6 +1239,13 @@ mod tests {
                     }
                     _ => InstructionCost::Fixed(1),
                 })
+            }
+
+            fn gas_charge_cost(&self) -> u64 {
+                0
+            }
+            fn linear_calc_cost(&self) -> u64 {
+                0
             }
         }
 

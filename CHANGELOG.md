@@ -16,6 +16,17 @@ The interface provided to smart contracts will adhere to semver with one excepti
 major version bumps will be backwards compatible with regard to already deployed contracts.
 In other words: Upgrading this pallet will not break pre-existing contracts.
 
+## [v0.3.0] 2022-12-09
+
+Reworked for FVM M2.2.
+
+- Dynamic instruction charging.
+- Reworked to not use parity-wasm.
+
+## [v0.2.0] 2022-04-14
+
+Reworked for FVM M1.
+
 ## [v0.1.1] 2022-01-18
 
 ### Fixed

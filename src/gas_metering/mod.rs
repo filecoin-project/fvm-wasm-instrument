@@ -412,7 +412,7 @@ fn determine_metered_blocks<R: Rules>(
         };
 
         match instruction {
-            Block { ty: _ } => {
+            Block { blockty: _ } => {
                 counter.increment(instruction_cost)?;
 
                 // Begin new block. The cost of the following opcodes until `end` or `else` will
@@ -422,11 +422,11 @@ fn determine_metered_blocks<R: Rules>(
                 let top_block_start_pos = counter.active_metered_block()?.start_pos;
                 counter.begin_control_block(top_block_start_pos, false);
             }
-            If { ty: _ } => {
+            If { blockty: _ } => {
                 counter.increment(instruction_cost)?;
                 counter.begin_control_block(cursor + 1, false);
             }
-            wasmparser::Operator::Loop { ty: _ } => {
+            wasmparser::Operator::Loop { blockty: _ } => {
                 counter.increment(instruction_cost)?;
                 counter.begin_control_block(cursor + 1, true);
             }
@@ -454,7 +454,7 @@ fn determine_metered_blocks<R: Rules>(
                 counter.branch(cursor, &[target_index])?;
             }
             wasmparser::Operator::BrTable {
-                table: br_table_data,
+                targets: br_table_data,
             } => {
                 counter.increment(instruction_cost)?;
 
@@ -1304,7 +1304,10 @@ mod tests {
                 I64Const(12),
                 I64Mul,
                 Call(1),
-                MemoryInit { mem: 0, data: 1 },
+                MemoryInit {
+                    mem: 0,
+                    data_index: 1
+                },
                 I32Const(8),
                 I32Const(0),
                 I32Const(2),
@@ -1316,7 +1319,10 @@ mod tests {
                 I64Const(12),
                 I64Mul,
                 Call(1),
-                MemoryInit { mem: 0, data: 0 },
+                MemoryInit {
+                    mem: 0,
+                    data_index: 0
+                },
                 End
             ]
         ));

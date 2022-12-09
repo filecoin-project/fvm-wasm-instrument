@@ -168,13 +168,13 @@ fn build_control_flow_graph(
         };
 
         match instruction {
-            Block { ty: _ } => {
+            Block { blockty: _ } => {
                 graph.increment_actual_cost(active_node_id, instruction_cost);
 
                 let exit_node_id = graph.add_node();
                 stack.push(ControlFrame::new(active_node_id, exit_node_id, false));
             }
-            If { ty: _ } => {
+            If { blockty: _ } => {
                 graph.increment_actual_cost(active_node_id, instruction_cost);
 
                 let then_node_id = graph.add_node();
@@ -184,7 +184,7 @@ fn build_control_flow_graph(
                 graph.new_forward_edge(active_node_id, then_node_id);
                 graph.set_first_instr_pos(then_node_id, cursor + 1);
             }
-            Loop { ty: _ } => {
+            Loop { blockty: _ } => {
                 graph.increment_actual_cost(active_node_id, instruction_cost);
 
                 let loop_node_id = graph.add_node();
@@ -245,7 +245,7 @@ fn build_control_flow_graph(
                 graph.set_first_instr_pos(new_node_id, cursor + 1);
             }
             BrTable {
-                table: br_table_data,
+                targets: br_table_data,
             } => {
                 graph.increment_actual_cost(active_node_id, instruction_cost);
 

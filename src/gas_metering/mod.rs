@@ -372,9 +372,9 @@ fn determine_metered_blocks<R: Rules>(
                     // be removed, and the logic creating temporary locals in insert_metering_calls
                     // will need to be made smarter.
                     match instruction_stack_top_type(instruction)? {
-						ValType::I32 => {},
-						_ => return Err(anyhow!("linearly priced instructions with non-i32 stack top aren't supported yet")),
-					};
+                        ValType::I32 => {},
+                        _ => return Err(anyhow!("linearly priced instructions with non-i32 stack top aren't supported yet")),
+                    };
 
                     metered_instrs.push(MeteredInstruction {
                         pos: cursor,
@@ -875,22 +875,22 @@ fn instruction_stack_top_type(instr: &Operator<'_>) -> Result<ValType> {
 
     match instr {
         // Note: may not trap on negative arg
-		// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-grow
-		MemoryGrow { .. }
+        // https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-grow
+        MemoryGrow { .. }
 
         | TableGrow { .. }
 
-		// Note: may not trap on negative arg, and/or may be very expensive
-		// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-init-x
-		| MemoryInit { .. }
+        // Note: may not trap on negative arg, and/or may be very expensive
+        // https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-init-x
+        | MemoryInit { .. }
 
-		// Note: may not trap on negative arg
-		// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-grow
+        // Note: may not trap on negative arg
+        // https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-grow
         | MemoryCopy { .. }
 
-		// Note: may not trap on negative arg, and/or may be very expensive
-		// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-fill
-		| MemoryFill { .. }
+        // Note: may not trap on negative arg, and/or may be very expensive
+        // https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-fill
+        | MemoryFill { .. }
 
         | TableInit { .. }
         | TableCopy { .. }
@@ -957,12 +957,12 @@ mod tests {
     fn simple_grow() {
         let module = parse_wat(
             r#"(module
-			(func (result i32)
-			  global.get 0
-			  memory.grow)
-			(global i32 (i32.const 42))
-			(memory 0 1)
-			)"#,
+            (func (result i32)
+              global.get 0
+              memory.grow)
+            (global i32 (i32.const 42))
+            (memory 0 1)
+            )"#,
         );
 
         let raw_wasm = module.bytes();
@@ -1006,11 +1006,11 @@ mod tests {
     fn grow_const() {
         let module = parse_wat(
             r#"(module
-			(func (result i32)
-			  i32.const 10
-			  memory.grow)
-			(memory 0 1)
-			)"#,
+            (func (result i32)
+              i32.const 10
+              memory.grow)
+            (memory 0 1)
+            )"#,
         );
 
         let raw_wasm = module.bytes();
@@ -1040,11 +1040,11 @@ mod tests {
     fn grow_const_neg_fail() {
         let module = parse_wat(
             r#"(module
-			(func (result i32)
-			  i32.const -10
-			  memory.grow)
-			(memory 0 1)
-			)"#,
+            (func (result i32)
+              i32.const -10
+              memory.grow)
+            (memory 0 1)
+            )"#,
         );
 
         let raw_wasm = module.bytes();
@@ -1074,23 +1074,23 @@ mod tests {
 
         let module = parse_wat(
             r#"(module
-			(global i32 (i32.const 42))
-			(memory 0 1)
-			(func (param i32) (result i32)
-			  local.get 0
-			  global.get 0
-			  i32.mul
-			  memory.grow
-			  (memory.init 1
-				  (i32.const 16)
-				  (i32.const 0)
-				  (i32.mul (i32.const 7) (i32.const 1)))
-			  (memory.init 0
-				  (i32.const 8)
-				  (i32.const 0)
-				  (i32.mul (i32.const 2) (i32.const 1))))
-			(data "gm")
-			(data "goodbye"))"#,
+            (global i32 (i32.const 42))
+            (memory 0 1)
+            (func (param i32) (result i32)
+              local.get 0
+              global.get 0
+              i32.mul
+              memory.grow
+              (memory.init 1
+                  (i32.const 16)
+                  (i32.const 0)
+                  (i32.mul (i32.const 7) (i32.const 1)))
+              (memory.init 0
+                  (i32.const 8)
+                  (i32.const 0)
+                  (i32.mul (i32.const 2) (i32.const 1))))
+            (data "gm")
+            (data "goodbye"))"#,
         );
 
         let raw_wasm = module.bytes();
@@ -1172,12 +1172,12 @@ mod tests {
     fn grow_no_gas_no_track() {
         let raw_wasm = parse_wat(
             r"(module
-			(func (result i32)
-			  global.get 0
-			  memory.grow)
-			(global i32 (i32.const 42))
-			(memory 0 1)
-			)",
+            (func (result i32)
+              global.get 0
+              memory.grow)
+            (global i32 (i32.const 42))
+            (memory 0 1)
+            )",
         )
         .bytes();
         let injected_raw_wasm = inject(&raw_wasm, &ConstantCostRules::default(), "env").unwrap();
@@ -1197,22 +1197,22 @@ mod tests {
     fn call_index() {
         let raw_wasm = parse_wat(
             r"(module
-				  (type (;0;) (func (result i32)))
-				  (func (;0;) (type 0) (result i32))
-				  (func (;1;) (type 0) (result i32)
-					call 0
-					if  ;; label = @1
-					  call 0
-					  call 0
-					  call 0
-					else
-					  call 0
-					  call 0
-					end
-					call 0
-				  )
-				  (global (;0;) i32 )
-				)",
+                  (type (;0;) (func (result i32)))
+                  (func (;0;) (type 0) (result i32))
+                  (func (;1;) (type 0) (result i32)
+                    call 0
+                    if  ;; label = @1
+                      call 0
+                      call 0
+                      call 0
+                    else
+                      call 0
+                      call 0
+                    end
+                    call 0
+                  )
+                  (global (;0;) i32 )
+                )",
         )
         .bytes();
         let injected_raw_wasm = inject(&raw_wasm, &ConstantCostRules::default(), "env").unwrap();
@@ -1264,55 +1264,55 @@ mod tests {
     test_gas_counter_injection! {
         name = simple;
         input = r#"
-		(module
-			(func (result i32)
-				(get_global 0)))
-		"#;
+        (module
+            (func (result i32)
+                (get_global 0)))
+        "#;
         expected = r#"
-		(module
-			(func (result i32)
-				(call 1 (i64.const 1))
-				(get_global 1)))
-		"#
+        (module
+            (func (result i32)
+                (call 1 (i64.const 1))
+                (get_global 1)))
+        "#
     }
 
     #[test]
     fn test_gas_error_fvm_fuzzin_5() {
         let input = r#"
-		(module
-			(type (;0;) (func (result i32)))
-			(type (;1;) (func (param i32)))
-			(type (;2;) (func (param i32) (result i32)))
-			(type (;3;) (func (param i32 i32)))
-			(type (;4;) (func (param i32) (result i64)))
-			(type (;5;) (func (param i32 i32 i32) (result i64)))
-			(type (;6;) (func (param i32 i32 i32)))
-			(type (;7;) (func (param i32 i32) (result i32)))
-			(type (;8;) (func (param i32 i32 i32 i32)))
-			(type (;9;) (func (param i64 i32) (result i64)))
-			(type (;10;) (func (param i32 i64)))
-			(import "env" "memory" (memory (;0;) 256 256))
-			(import "env" "DYNAMICTOP_PTR" (global (;0;) i32))
-			(import "env" "STACKTOP" (global (;1;) i32))
-			(import "env" "enlargeMemory" (func (;0;) (type 0)))
-			(import "env" "getTotalMemory" (func (;1;) (type 0)))
-			(import "env" "abortOnCannotGrowMemory" (func (;2;) (type 0)))
-			(import "env" "___setErrNo" (func (;3;) (type 1)))
-			(func (;4;) (type 9) (param i64 i32) (result i64)
-			  local.get 0
-			  i32.const 64
-			  local.get 1
-			  i32.sub
-			  i64.extend_i32_u
-			  i64.shl
-			  local.get 0
-			  local.get 1
-			  i64.extend_i32_u
-			  i64.shr_u
-			  i64.or
-			)
-		  )
-		"#;
+        (module
+            (type (;0;) (func (result i32)))
+            (type (;1;) (func (param i32)))
+            (type (;2;) (func (param i32) (result i32)))
+            (type (;3;) (func (param i32 i32)))
+            (type (;4;) (func (param i32) (result i64)))
+            (type (;5;) (func (param i32 i32 i32) (result i64)))
+            (type (;6;) (func (param i32 i32 i32)))
+            (type (;7;) (func (param i32 i32) (result i32)))
+            (type (;8;) (func (param i32 i32 i32 i32)))
+            (type (;9;) (func (param i64 i32) (result i64)))
+            (type (;10;) (func (param i32 i64)))
+            (import "env" "memory" (memory (;0;) 256 256))
+            (import "env" "DYNAMICTOP_PTR" (global (;0;) i32))
+            (import "env" "STACKTOP" (global (;1;) i32))
+            (import "env" "enlargeMemory" (func (;0;) (type 0)))
+            (import "env" "getTotalMemory" (func (;1;) (type 0)))
+            (import "env" "abortOnCannotGrowMemory" (func (;2;) (type 0)))
+            (import "env" "___setErrNo" (func (;3;) (type 1)))
+            (func (;4;) (type 9) (param i64 i32) (result i64)
+              local.get 0
+              i32.const 64
+              local.get 1
+              i32.sub
+              i64.extend_i32_u
+              i64.shl
+              local.get 0
+              local.get 1
+              i64.extend_i32_u
+              i64.shr_u
+              i64.or
+            )
+          )
+        "#;
         let raw_wasm = parse_wat(input).bytes();
         let injected_raw_wasm = inject(&raw_wasm, &ConstantCostRules::default(), "other")
             .expect("inject_gas_counter call failed");
@@ -1362,16 +1362,16 @@ mod tests {
     #[test]
     fn test_user_gas_global_fails() {
         let input = r#"
-		(module
-			(type (;0;) (func (param i64 i32) (result i64)))
-			(import "other" "gas_counter" (global (;0;) i64))
-			(func (;0;) (type 0) (param i64 i32) (result i64)
-			  local.get 0
-			  local.get 1
-			  i64.or
-			)
-		  )
-		"#;
+        (module
+            (type (;0;) (func (param i64 i32) (result i64)))
+            (import "other" "gas_counter" (global (;0;) i64))
+            (func (;0;) (type 0) (param i64 i32) (result i64)
+              local.get 0
+              local.get 1
+              i64.or
+            )
+          )
+        "#;
         let raw_wasm = parse_wat(input).bytes();
         let estr = inject(&raw_wasm, &ConstantCostRules::default(), "other")
             .unwrap_err()
@@ -1382,262 +1382,262 @@ mod tests {
     test_gas_counter_injection! {
         name = nested;
         input = r#"
-		(module
-			(func (result i32)
-				(get_global 0)
-				(block
-					(get_global 0)
-					(get_global 0)
-					(get_global 0))
-				(get_global 0)))
-		"#;
+        (module
+            (func (result i32)
+                (get_global 0)
+                (block
+                    (get_global 0)
+                    (get_global 0)
+                    (get_global 0))
+                (get_global 0)))
+        "#;
         expected = r#"
-		(module
-			(func (result i32)
-				(call 1 (i64.const 6))
-				(get_global 1)
-				(block
-					(get_global 1)
-					(get_global 1)
-					(get_global 1))
-				(get_global 1)))
-		"#
+        (module
+            (func (result i32)
+                (call 1 (i64.const 6))
+                (get_global 1)
+                (block
+                    (get_global 1)
+                    (get_global 1)
+                    (get_global 1))
+                (get_global 1)))
+        "#
     }
 
     test_gas_counter_injection! {
         name = ifelse;
         input = r#"
-		(module
-			(func (result i32)
-				(get_global 0)
-				(if
-					(then
-						(get_global 0)
-						(get_global 0)
-						(get_global 0))
-					(else
-						(get_global 0)
-						(get_global 0)))
-				(get_global 0)))
-		"#;
+        (module
+            (func (result i32)
+                (get_global 0)
+                (if
+                    (then
+                        (get_global 0)
+                        (get_global 0)
+                        (get_global 0))
+                    (else
+                        (get_global 0)
+                        (get_global 0)))
+                (get_global 0)))
+        "#;
         expected = r#"
-		(module
-			(func (result i32)
-				(call 1 (i64.const 3))
-				(get_global 1)
-				(if
-					(then
-						(call 1 (i64.const 3))
-						(get_global 1)
-						(get_global 1)
-						(get_global 1))
-					(else
-						(call 1 (i64.const 2))
-						(get_global 1)
-						(get_global 1)))
-				(get_global 1)))
-		"#
+        (module
+            (func (result i32)
+                (call 1 (i64.const 3))
+                (get_global 1)
+                (if
+                    (then
+                        (call 1 (i64.const 3))
+                        (get_global 1)
+                        (get_global 1)
+                        (get_global 1))
+                    (else
+                        (call 1 (i64.const 2))
+                        (get_global 1)
+                        (get_global 1)))
+                (get_global 1)))
+        "#
     }
 
     test_gas_counter_injection! {
         name = branch_innermost;
         input = r#"
-		(module
-			(func (result i32)
-				(get_global 0)
-				(block
-					(get_global 0)
-					(drop)
-					(br 0)
-					(get_global 0)
-					(drop))
-				(get_global 0)))
-		"#;
+        (module
+            (func (result i32)
+                (get_global 0)
+                (block
+                    (get_global 0)
+                    (drop)
+                    (br 0)
+                    (get_global 0)
+                    (drop))
+                (get_global 0)))
+        "#;
         expected = r#"
-		(module
-			(func (result i32)
-				(call 1 (i64.const 6))
-				(get_global 1)
-				(block
-					(get_global 1)
-					(drop)
-					(br 0)
-					(call 1 (i64.const 2))
-					(get_global 1)
-					(drop))
-				(get_global 1)))
-		"#
+        (module
+            (func (result i32)
+                (call 1 (i64.const 6))
+                (get_global 1)
+                (block
+                    (get_global 1)
+                    (drop)
+                    (br 0)
+                    (call 1 (i64.const 2))
+                    (get_global 1)
+                    (drop))
+                (get_global 1)))
+        "#
     }
 
     test_gas_counter_injection! {
         name = branch_outer_block;
         input = r#"
-		(module
-			(func (result i32)
-				(get_global 0)
-				(block
-					(get_global 0)
-					(if
-						(then
-							(get_global 0)
-							(get_global 0)
-							(drop)
-							(br_if 1)))
-					(get_global 0)
-					(drop))
-				(get_global 0)))
-		"#;
+        (module
+            (func (result i32)
+                (get_global 0)
+                (block
+                    (get_global 0)
+                    (if
+                        (then
+                            (get_global 0)
+                            (get_global 0)
+                            (drop)
+                            (br_if 1)))
+                    (get_global 0)
+                    (drop))
+                (get_global 0)))
+        "#;
         expected = r#"
-		(module
-			(func (result i32)
-				(call 1 (i64.const 5))
-				(get_global 1)
-				(block
-					(get_global 1)
-					(if
-						(then
-							(call 1 (i64.const 4))
-							(get_global 1)
-							(get_global 1)
-							(drop)
-							(br_if 1)))
-					(call 1 (i64.const 2))
-					(get_global 1)
-					(drop))
-				(get_global 1)))
-		"#
+        (module
+            (func (result i32)
+                (call 1 (i64.const 5))
+                (get_global 1)
+                (block
+                    (get_global 1)
+                    (if
+                        (then
+                            (call 1 (i64.const 4))
+                            (get_global 1)
+                            (get_global 1)
+                            (drop)
+                            (br_if 1)))
+                    (call 1 (i64.const 2))
+                    (get_global 1)
+                    (drop))
+                (get_global 1)))
+        "#
     }
 
     test_gas_counter_injection! {
         name = branch_outer_loop;
         input = r#"
-		(module
-			(func (result i32)
-				(get_global 0)
-				(loop
-					(get_global 0)
-					(if
-						(then
-							(get_global 0)
-							(br_if 0))
-						(else
-							(get_global 0)
-							(get_global 0)
-							(drop)
-							(br_if 1)))
-					(get_global 0)
-					(drop))
-				(get_global 0)))
-		"#;
+        (module
+            (func (result i32)
+                (get_global 0)
+                (loop
+                    (get_global 0)
+                    (if
+                        (then
+                            (get_global 0)
+                            (br_if 0))
+                        (else
+                            (get_global 0)
+                            (get_global 0)
+                            (drop)
+                            (br_if 1)))
+                    (get_global 0)
+                    (drop))
+                (get_global 0)))
+        "#;
         expected = r#"
-		(module
-			(func (result i32)
-				(call 1 (i64.const 3))
-				(get_global 1)
-				(loop
-					(call 1 (i64.const 4))
-					(get_global 1)
-					(if
-						(then
-							(call 1 (i64.const 2))
-							(get_global 1)
-							(br_if 0))
-						(else
-							(call 1 (i64.const 4))
-							(get_global 1)
-							(get_global 1)
-							(drop)
-							(br_if 1)))
-					(get_global 1)
-					(drop))
-				(get_global 1)))
-		"#
+        (module
+            (func (result i32)
+                (call 1 (i64.const 3))
+                (get_global 1)
+                (loop
+                    (call 1 (i64.const 4))
+                    (get_global 1)
+                    (if
+                        (then
+                            (call 1 (i64.const 2))
+                            (get_global 1)
+                            (br_if 0))
+                        (else
+                            (call 1 (i64.const 4))
+                            (get_global 1)
+                            (get_global 1)
+                            (drop)
+                            (br_if 1)))
+                    (get_global 1)
+                    (drop))
+                (get_global 1)))
+        "#
     }
 
     test_gas_counter_injection! {
         name = return_from_func;
         input = r#"
-		(module
-			(func (result i32)
-				(get_global 0)
-				(if
-					(then
-						(return)))
-				(get_global 0)))
-		"#;
+        (module
+            (func (result i32)
+                (get_global 0)
+                (if
+                    (then
+                        (return)))
+                (get_global 0)))
+        "#;
         expected = r#"
-		(module
-			(func (result i32)
-				(call 1 (i64.const 2))
-				(get_global 1)
-				(if
-					(then
-						(call 1 (i64.const 1))
-						(return)))
-				(call 1 (i64.const 1))
-				(get_global 1)))
-		"#
+        (module
+            (func (result i32)
+                (call 1 (i64.const 2))
+                (get_global 1)
+                (if
+                    (then
+                        (call 1 (i64.const 1))
+                        (return)))
+                (call 1 (i64.const 1))
+                (get_global 1)))
+        "#
     }
 
     test_gas_counter_injection! {
         name = branch_from_if_not_else;
         input = r#"
-		(module
-			(func (result i32)
-				(get_global 0)
-				(block
-					(get_global 0)
-					(if
-						(then (br 1))
-						(else (br 0)))
-					(get_global 0)
-					(drop))
-				(get_global 0)))
-		"#;
+        (module
+            (func (result i32)
+                (get_global 0)
+                (block
+                    (get_global 0)
+                    (if
+                        (then (br 1))
+                        (else (br 0)))
+                    (get_global 0)
+                    (drop))
+                (get_global 0)))
+        "#;
         expected = r#"
-		(module
-			(func (result i32)
-				(call 1 (i64.const 5))
-				(get_global 1)
-				(block
-					(get_global 1)
-					(if
-						(then
-							(call 1 (i64.const 1))
-							(br 1))
-						(else
-							(call 1 (i64.const 1))
-							(br 0)))
-					(call 1 (i64.const 2))
-					(get_global 1)
-					(drop))
-				(get_global 1)))
-		"#
+        (module
+            (func (result i32)
+                (call 1 (i64.const 5))
+                (get_global 1)
+                (block
+                    (get_global 1)
+                    (if
+                        (then
+                            (call 1 (i64.const 1))
+                            (br 1))
+                        (else
+                            (call 1 (i64.const 1))
+                            (br 0)))
+                    (call 1 (i64.const 2))
+                    (get_global 1)
+                    (drop))
+                (get_global 1)))
+        "#
     }
 
     test_gas_counter_injection! {
         name = empty_loop;
         input = r#"
-		(module
-			(func
-				(loop
-					(br 0)
-				)
-				unreachable
-			)
-		)
-		"#;
+        (module
+            (func
+                (loop
+                    (br 0)
+                )
+                unreachable
+            )
+        )
+        "#;
         expected = r#"
-		(module
-			(func
-				(call 1 (i64.const 2))
-				(loop
-					(call 1 (i64.const 1))
-					(br 0)
-				)
-				unreachable
-			)
-		)
-		"#
+        (module
+            (func
+                (call 1 (i64.const 2))
+                (loop
+                    (call 1 (i64.const 1))
+                    (br 0)
+                )
+                unreachable
+            )
+        )
+        "#
     }
 }

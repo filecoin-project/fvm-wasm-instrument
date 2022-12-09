@@ -335,8 +335,28 @@ impl ModuleInfo {
 
     pub fn bytes(&self) -> Vec<u8> {
         let mut module = wasm_encoder::Module::new();
-        for s in self.raw_sections.values() {
-            module.section(s);
+
+        let section_order = [
+            SectionId::Custom,
+            SectionId::Type,
+            SectionId::Import,
+            SectionId::Function,
+            SectionId::Table,
+            SectionId::Memory,
+            SectionId::Global,
+            SectionId::Export,
+            SectionId::Start,
+            SectionId::Element,
+            SectionId::DataCount, // datacount goes before code
+            SectionId::Code,
+            SectionId::Data,
+            SectionId::Tag,
+        ];
+
+        for s in section_order {
+            if let Some(sec) = self.raw_sections.get(&s.into()) {
+                module.section(sec);
+            }
         }
         module.finish()
     }

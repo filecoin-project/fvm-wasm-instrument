@@ -9,6 +9,7 @@
 //! the worst case.
 
 use super::{ConstantCostRules, MeteredBlock, Rules};
+use crate::gas_metering::InstructionCost;
 use anyhow::{anyhow, Result};
 use std::collections::BTreeMap as Map;
 use wasmparser::Operator;
@@ -158,9 +159,14 @@ fn build_control_flow_graph(
             graph.increment_charged_cost(active_node_id, next_metered_block.cost);
         }
 
-        let instruction_cost = rules
-            .instruction_cost(instruction)
-            .ok_or_else(|| anyhow!("gas rule for instruction {:?} not found", &instruction))?;
+        let instruction_cost = match rules.instruction_cost(instruction) {
+            Ok(InstructionCost::Fixed(c)) => c,
+            _ => Err(anyhow!(
+                "gas rule for instruction {:?} not found or not supported",
+                &instruction
+            ))?,
+        };
+
         match instruction {
             Block { ty: _ } => {
                 graph.increment_actual_cost(active_node_id, instruction_cost);
@@ -201,7 +207,7 @@ fn build_control_flow_graph(
             }
             End => {
                 let closing_frame = stack.pop()
-					.expect("module is valid by pre-condition; ends correspond to control stack frames; qed");
+                    .expect("module is valid by pre-condition; ends correspond to control stack frames; qed");
 
                 graph.new_forward_edge(active_node_id, closing_frame.exit_node);
                 graph.set_first_instr_pos(closing_frame.exit_node, cursor + 1);
@@ -377,7 +383,7 @@ mod tests {
                     .unwrap();
                 for func_body in bodies {
                     let rules = ConstantCostRules::default();
-                    let metered_blocks = determine_metered_blocks(&func_body, &rules).unwrap();
+                    let (metered_blocks, _) = determine_metered_blocks(&func_body, &rules).unwrap();
                     let success =
                         validate_metering_injections(&func_body, &rules, &metered_blocks).unwrap();
                     assert!(success);

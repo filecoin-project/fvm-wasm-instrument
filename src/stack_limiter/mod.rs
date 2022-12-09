@@ -43,7 +43,7 @@ macro_rules! instrument_call {
 mod max_height;
 mod thunk;
 
-pub struct Context {
+struct Context {
     stack_height_global_idx: u32,
     func_stack_costs: Vec<u32>,
     stack_limit: u32,

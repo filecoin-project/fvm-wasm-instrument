@@ -22,8 +22,11 @@ use wasm_encoder::{
 use wasmparser::{
     CodeSectionReader, DataKind, DataSectionReader, ElementItem, ElementSectionReader,
     ExportSectionReader, ExternalKind, FuncType, FunctionBody, FunctionSectionReader,
-    ImportSectionReader, Operator, SectionReader, Type, TypeRef, TypeSectionReader,
+    ImportSectionReader, SectionReader, Type, TypeRef, TypeSectionReader,
 };
+
+#[doc(inline)]
+pub use wasmparser::Operator;
 
 pub const GAS_COUNTER_NAME: &str = "gas_counter";
 

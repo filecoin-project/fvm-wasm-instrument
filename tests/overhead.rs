@@ -1,4 +1,4 @@
-use fvm_wasm_instrument::{gas_metering, inject_stack_limiter};
+use fvm_wasm_instrument::{gas_metering, stack_limiter};
 use std::{
     fs::{read, read_dir},
     path::PathBuf,
@@ -33,8 +33,8 @@ fn print_size_overhead() {
                 .unwrap();
                 (module.len(), module)
             };
-            let stack_height_len = inject_stack_limiter(&orig_module, 128).unwrap().len();
-            let both_len = inject_stack_limiter(&gas_module, 128).unwrap().len();
+            let stack_height_len = stack_limiter::inject(&orig_module, 128).unwrap().len();
+            let both_len = stack_limiter::inject(&gas_module, 128).unwrap().len();
 
             let overhead = both_len * 100 / orig_len;
             (

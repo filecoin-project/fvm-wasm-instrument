@@ -1,4 +1,4 @@
-use fvm_wasm_instrument::{self as instrument};
+use fvm_wasm_instrument::{gas_metering, stack_limiter};
 use std::{
     fs,
     io::{self, Read, Write},
@@ -74,7 +74,7 @@ mod stack_height {
                 run_diff_test(
                     "stack-height",
                     concat!(stringify!($name), ".wat"),
-                    |input| instrument::inject_stack_limiter(input, 1024).unwrap(),
+                    |input| stack_limiter::inject(input, 1024).unwrap(),
                 );
             }
         };
@@ -97,8 +97,8 @@ mod gas {
             #[test]
             fn $name() {
                 run_diff_test("gas", concat!(stringify!($name), ".wat"), |input| {
-                    let rules = instrument::gas_metering::ConstantCostRules::default();
-                    instrument::gas_metering::inject(&input, &rules, "env").unwrap()
+                    let rules = gas_metering::ConstantCostRules::default();
+                    gas_metering::inject(&input, &rules, "env").unwrap()
                 });
             }
         };

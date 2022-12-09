@@ -24,7 +24,7 @@ struct Thunk {
     callee_stack_cost: u32,
 }
 
-pub fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Result<()> {
+pub(super) fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Result<()> {
     // First, we need to collect all function indices that should be replaced by thunks
     let exports = match module.raw_sections.get(&SectionId::Export.into()) {
         Some(raw_sec) => ExportSectionReader::new(&raw_sec.data, 0)?

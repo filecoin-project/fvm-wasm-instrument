@@ -3,7 +3,7 @@ use criterion::{
     Throughput,
 };
 
-use fvm_wasm_instrument::{gas_metering, inject_stack_limiter};
+use fvm_wasm_instrument::{gas_metering, stack_limiter};
 
 use std::{
     fs::{read, read_dir},
@@ -44,7 +44,7 @@ fn gas_metering(c: &mut Criterion) {
 fn stack_height_limiter(c: &mut Criterion) {
     let mut group = c.benchmark_group("Stack Height Limiter");
     any_fixture(&mut group, |raw_wasm| {
-        inject_stack_limiter(raw_wasm, 128).unwrap();
+        stack_limiter::inject(raw_wasm, 128).unwrap();
     });
 }
 

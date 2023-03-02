@@ -190,11 +190,8 @@ pub(super) fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Res
                         table_index,
                         offset_expr,
                     } => {
-                        offset = DefaultTranslator.translate_const_expr(
-                            &offset_expr,
-                            &wasmparser::ValType::I32,
-                            ConstExprKind::ElementOffset,
-                        )?;
+                        offset = DefaultTranslator
+                            .translate_const_expr(&offset_expr, ConstExprKind::ElementOffset)?;
                         ElementMode::Active {
                             table: Some(table_index),
                             offset: &offset,
@@ -207,7 +204,7 @@ pub(super) fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Res
                 ele_sec_builder.segment(wasm_encoder::ElementSegment {
                     mode,
                     /// The element segment's type.
-                    element_type: DefaultTranslator.translate_ty(&ele.ty)?,
+                    element_type: DefaultTranslator.translate_ref_ty(&ele.ty)?,
                     /// This segment's elements.
                     elements: Elements::Functions(&functions),
                 });

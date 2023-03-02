@@ -158,7 +158,7 @@ impl ModuleInfo {
                     info.section(SectionId::Table.into(), reader.range(), input_wasm);
 
                     for ty in reader {
-                        info.table_elem_types.push(ty?);
+                        info.table_elem_types.push(ty?.ty);
                     }
                 }
                 Payload::MemorySection(reader) => {
@@ -443,7 +443,9 @@ pub fn copy_locals(
     let current_locals = func_body
         .get_locals_reader()?
         .into_iter()
-        .map(|local| local.map(|(count, ty)| (count, DefaultTranslator.translate_ty(&ty).unwrap())))
+        .map(|local| {
+            local.map(|(count, ty)| (count, DefaultTranslator.translate_val_ty(&ty).unwrap()))
+        })
         .collect::<Result<_, _>>()?;
 
     Ok(current_locals)

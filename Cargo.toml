@@ -23,7 +23,7 @@ codegen-units = 1
 [dependencies]
 wasmprinter = "0.2"
 wasm-encoder = "0.23.0"
-wasmparser = "0.95.0"
+wasmparser = "0.96.0"
 anyhow = "1.0.65"
 
 [dev-dependencies]

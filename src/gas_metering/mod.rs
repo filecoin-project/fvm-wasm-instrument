@@ -20,9 +20,9 @@ use wasm_encoder::{
     BlockType, ExportSection, Function, ImportSection, Instruction, SectionId, ValType,
 };
 use wasmparser::{
-    CodeSectionReader, DataKind, DataSectionReader, ElementItem, ElementSectionReader,
+    CodeSectionReader, DataKind, DataSectionReader, ElementItems, ElementSectionReader,
     ExportSectionReader, ExternalKind, FuncType, FunctionBody, FunctionSectionReader,
-    ImportSectionReader, SectionReader, Type, TypeRef, TypeSectionReader,
+    ImportSectionReader, Type, TypeRef, TypeSectionReader,
 };
 
 #[doc(inline)]
@@ -583,13 +583,11 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
     // Updating calling addresses (all calls to function index >= `gas_func` should be incremented)
     if let Some(code_section) = module_info.raw_sections.get_mut(&SectionId::Code.into()) {
         let mut code_section_builder = wasm_encoder::CodeSection::new();
-        let mut code_sec_reader = CodeSectionReader::new(&code_section.data, 0)?;
-
         let mut param_counts = func_param_counts.into_iter();
 
         // For each function
-        while !code_sec_reader.eof() {
-            let func_body = code_sec_reader.read()?;
+        for func_body in CodeSectionReader::new(&code_section.data, 0)? {
+            let func_body = func_body?;
             let mut func_builder = wasm_encoder::Function::new(copy_locals(&func_body)?);
 
             // Go through instructions, increment all global gets
@@ -636,9 +634,8 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
 
     if let Some(export_section) = module_info.raw_sections.get_mut(&SectionId::Export.into()) {
         let mut export_sec_builder = ExportSection::new();
-        let mut export_sec_reader = ExportSectionReader::new(&export_section.data, 0)?;
-        while !export_sec_reader.eof() {
-            let export = export_sec_reader.read()?;
+        for export in ExportSectionReader::new(&export_section.data, 0)? {
+            let export = export?;
             let mut global_index = export.index;
             if let ExternalKind::Global = export.kind {
                 if global_index >= gas_global {
@@ -684,10 +681,9 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
     if let Some(ele_section) = module_info.raw_sections.get_mut(&SectionId::Element.into()) {
         let ele_sec_reader = ElementSectionReader::new(&ele_section.data, 0)?;
         for segment in ele_sec_reader {
-            let element_reader = segment?.items.get_items_reader()?;
-            for ele in element_reader {
-                if let ElementItem::Expr(expr) = ele? {
-                    let operators = expr
+            if let ElementItems::Expressions(expressions) = segment?.items {
+                for expr in expressions {
+                    let operators = expr?
                         .get_operators_reader()
                         .into_iter()
                         .collect::<wasmparser::Result<Vec<Operator>>>()

@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use wasm_encoder::{ExportKind, *};
 use wasmparser::{
-    DataKind, ElementItem, ElementKind, ExternalKind, FunctionBody, Global, Import, Operator, Type,
+    DataKind, ElementItems, ElementKind, ExternalKind, FunctionBody, Global, Import, Operator, Type,
 };
 
 #[allow(unused)]
@@ -293,25 +293,24 @@ pub fn element(
     let element_type = t.translate_ty(&element.ty)?;
     let mut functions = Vec::new();
     let mut exprs = Vec::new();
-    let mut reader = element.items.get_items_reader()?;
-    for _ in 0..reader.get_count() {
-        match reader.read()? {
-            ElementItem::Func(idx) => {
-                functions.push(idx);
-            }
-            ElementItem::Expr(expr) => {
-                exprs.push(t.translate_const_expr(
-                    &expr,
-                    &element.ty,
-                    ConstExprKind::ElementFunction,
-                )?);
-            }
+    match element.items {
+        ElementItems::Functions(section) => {
+            functions = section.into_iter().collect::<Result<_, _>>()?;
+        }
+        ElementItems::Expressions(section) => {
+            exprs = section
+                .into_iter()
+                .map(|expr| {
+                    let expr = expr?;
+                    t.translate_const_expr(&expr, &element.ty, ConstExprKind::ElementFunction)
+                })
+                .collect::<Result<_, _>>()?;
         }
     }
     s.segment(ElementSegment {
         mode,
         element_type,
-        elements: if reader.uses_exprs() {
+        elements: if !exprs.is_empty() {
             Elements::Expressions(&exprs)
         } else {
             Elements::Functions(&functions)

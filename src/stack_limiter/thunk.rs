@@ -13,7 +13,7 @@ use wasm_encoder::{
     CodeSection, ElementMode, ElementSection, Elements, ExportSection, FunctionSection, SectionId,
 };
 use wasmparser::{
-    CodeSectionReader, ElementItem, ElementKind, ElementSectionReader, ExportSectionReader,
+    CodeSectionReader, ElementItems, ElementKind, ElementSectionReader, ExportSectionReader,
     ExternalKind, FunctionSectionReader, Type,
 };
 
@@ -49,19 +49,13 @@ pub(super) fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Res
 
         let mut table_func_indices = vec![];
         for segment in elem_segments.clone() {
-            let reader = segment.items.get_items_reader()?;
-            if !reader.uses_exprs() {
-                let segment_func_indices = &reader
-                    .into_iter()
-                    .map(|v| match v {
-                        Ok(v2) => match v2 {
-                            ElementItem::Func(func_idx) => Ok(func_idx),
-                            ElementItem::Expr(_) => Err(anyhow!("never exec here")),
-                        },
-                        Err(_) => Err(anyhow!("read element item error")),
-                    })
-                    .collect::<anyhow::Result<Vec<u32>>>()?;
-                table_func_indices.extend_from_slice(segment_func_indices);
+            match segment.items {
+                ElementItems::Functions(segment) => {
+                    for func_idx in segment {
+                        table_func_indices.push(func_idx?);
+                    }
+                }
+                ElementItems::Expressions(_) => {}
             }
         }
 
@@ -175,55 +169,52 @@ pub(super) fn generate_thunks(ctx: &mut Context, module: &mut ModuleInfo) -> Res
 
     let mut ele_sec_builder = ElementSection::new();
     for ele in elem_segments {
-        let reader = ele.items.get_items_reader()?;
-        if !reader.uses_exprs() {
-            let mut functions = Vec::new();
-            for item in reader {
-                let mut new_func_idx;
-                match item? {
-                    ElementItem::Func(func_idx) => {
-                        new_func_idx = func_idx;
-                        if let Some(thunk) = replacement_map.get(&func_idx) {
-                            new_func_idx = thunk
-                                .idx
-                                .expect("at this point an index must be assigned to each thunk");
+        match ele.items {
+            ElementItems::Functions(section) => {
+                let mut functions = Vec::new();
+                for func_idx in section {
+                    let mut func_idx: u32 = func_idx?;
+                    if let Some(thunk) = replacement_map.get(&func_idx) {
+                        func_idx = thunk
+                            .idx
+                            .expect("at this point an index must be assigned to each thunk");
+                    }
+
+                    functions.push(func_idx);
+                }
+
+                //todo edit element is little complex,
+                let offset;
+                let mode = match ele.kind {
+                    ElementKind::Active {
+                        table_index,
+                        offset_expr,
+                    } => {
+                        offset = DefaultTranslator.translate_const_expr(
+                            &offset_expr,
+                            &wasmparser::ValType::I32,
+                            ConstExprKind::ElementOffset,
+                        )?;
+                        ElementMode::Active {
+                            table: Some(table_index),
+                            offset: &offset,
                         }
                     }
-                    _ => return Err(anyhow!("element must be func here")),
-                }
-                functions.push(new_func_idx);
+                    ElementKind::Passive => ElementMode::Passive,
+                    ElementKind::Declared => ElementMode::Declared,
+                };
+
+                ele_sec_builder.segment(wasm_encoder::ElementSegment {
+                    mode,
+                    /// The element segment's type.
+                    element_type: DefaultTranslator.translate_ty(&ele.ty)?,
+                    /// This segment's elements.
+                    elements: Elements::Functions(&functions),
+                });
             }
-
-            //todo edit element is little complex,
-            let offset;
-            let mode = match ele.kind {
-                ElementKind::Active {
-                    table_index,
-                    offset_expr,
-                } => {
-                    offset = DefaultTranslator.translate_const_expr(
-                        &offset_expr,
-                        &wasmparser::ValType::I32,
-                        ConstExprKind::ElementOffset,
-                    )?;
-                    ElementMode::Active {
-                        table: Some(table_index),
-                        offset: &offset,
-                    }
-                }
-                ElementKind::Passive => ElementMode::Passive,
-                ElementKind::Declared => ElementMode::Declared,
-            };
-
-            ele_sec_builder.segment(wasm_encoder::ElementSegment {
-                mode,
-                /// The element segment's type.
-                element_type: DefaultTranslator.translate_ty(&ele.ty)?,
-                /// This segment's elements.
-                elements: Elements::Functions(&functions),
-            });
-        } else {
-            DefaultTranslator.translate_element(ele, &mut ele_sec_builder)?;
+            ElementItems::Expressions(_) => {
+                DefaultTranslator.translate_element(ele, &mut ele_sec_builder)?;
+            }
         }
     }
 

@@ -14,27 +14,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checking out
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
     - name: Installing Rust
-      uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+      uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         components: rustfmt
     - name: Running fmt
-      uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
-      with:
-        command: fmt
-        args: -- --check
+      run: cargo fmt -- --check
 
   check-clippy:
     runs-on: ubuntu-latest
     steps:
     - name: Checking out
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
     - name: Installing Rust
-      uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+      uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         components: clippy
     - name: Code Lint
       uses: ./.github/actions/rust-cargo-run
@@ -47,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checking out
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
     - name: Running tests
       uses: ./.github/actions/rust-cargo-run
       with:

@@ -15,25 +15,23 @@ jobs:
     steps:
     - name: Checking out
       uses: actions/checkout@v3
-    - name: Installing Rust
-      uses: dtolnay/rust-toolchain@stable
+    - name: Running fmt
+      uses: ./.github/actions/rust-cargo-run
       with:
         components: rustfmt
-    - name: Running fmt
-      run: cargo fmt -- --check
+        command: fmt
+        args: -- --check
+        github_token: ${{ secrets.GITHUB_TOKEN }}
 
   check-clippy:
     runs-on: ubuntu-latest
     steps:
     - name: Checking out
       uses: actions/checkout@v3
-    - name: Installing Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: clippy
     - name: Code Lint
       uses: ./.github/actions/rust-cargo-run
       with:
+        components: clippy
         command: clippy
         args: --all-targets --all-features --workspace -- -D warnings
         github_token: ${{ secrets.GITHUB_TOKEN }}

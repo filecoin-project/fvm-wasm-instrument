@@ -25,10 +25,13 @@ inputs:
 runs:
   using: composite
   steps:
+  - name: Read rust-toolchain
+    id: rust
+    run: echo "toolchain=$(cat rust-toolchain)" >> $GITHUB_OUTPUT
   - name: Installing Rust
-    uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+    uses: dtolnay/rust-toolchain@master
     with:
-      profile: minimal
+      toolchain: ${{ steps.rust.outputs.toolchain }}
       components: ${{ inputs.components }}
   - name: Setting up cache
     uses: pl-strflt/rust-sccache-action@v1
@@ -41,9 +44,6 @@ runs:
       version: v0.2.15
       shared-key: v1-${{ inputs.cache_name }}  # change this to invalidate sccache for this job
   - name: Running ${{ inputs.command }}
-    uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
     env:
       CARGO_INCREMENTAL: '0'
-    with:
-      command: ${{ inputs.command }}
-      args: ${{ inputs.args }}
+    run: cargo ${{ inputs.command }} ${{ inputs.args }}

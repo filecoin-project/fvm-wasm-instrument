@@ -7,9 +7,7 @@ use std::{
 };
 
 use wasm_encoder::{Encode, SectionId};
-use wasmparser::{
-    Chunk, ExternalKind, GlobalType, MemoryType, Parser, Payload, SectionReader, TableType, Type,
-};
+use wasmparser::{Chunk, ExternalKind, GlobalType, MemoryType, Parser, Payload, TableType, Type};
 
 #[derive(Clone, Debug)]
 pub struct RawSection {
@@ -108,21 +106,19 @@ impl ModuleInfo {
 
                     continue;
                 }
-                Payload::TypeSection(mut reader) => {
+                Payload::TypeSection(reader) => {
                     info.section(SectionId::Type.into(), reader.range(), input_wasm);
 
                     // Save function types
-                    for _ in 0..reader.get_count() {
-                        reader.read().map(|ty| {
-                            info.types_map.push(ty);
-                        })?;
+                    for ty in reader {
+                        info.types_map.push(ty?);
                     }
                 }
-                Payload::ImportSection(mut reader) => {
+                Payload::ImportSection(reader) => {
                     info.section(SectionId::Import.into(), reader.range(), input_wasm);
 
-                    for _ in 0..reader.get_count() {
-                        let ty = reader.read()?;
+                    for ty in reader {
+                        let ty = ty?;
                         match ty.ty {
                             wasmparser::TypeRef::Func(ty) => {
                                 // Save imported functions
@@ -150,63 +146,60 @@ impl ModuleInfo {
                         }
                     }
                 }
-                Payload::FunctionSection(mut reader) => {
+                Payload::FunctionSection(reader) => {
                     info.section(SectionId::Function.into(), reader.range(), input_wasm);
 
-                    for _ in 0..reader.get_count() {
-                        reader.read().map(|ty| {
-                            info.function_map.push(ty);
-                        })?;
+                    for ty in reader {
+                        info.function_map.push(ty?);
                     }
                 }
-                Payload::TableSection(mut reader) => {
-                    info.table_count += reader.get_count();
+                Payload::TableSection(reader) => {
+                    info.table_count += reader.count();
                     info.section(SectionId::Table.into(), reader.range(), input_wasm);
 
-                    for _ in 0..reader.get_count() {
-                        let ty = reader.read()?;
-                        info.table_elem_types.push(ty);
+                    for ty in reader {
+                        info.table_elem_types.push(ty?.ty);
                     }
                 }
-                Payload::MemorySection(mut reader) => {
-                    info.memory_count += reader.get_count();
+                Payload::MemorySection(reader) => {
+                    info.memory_count += reader.count();
                     info.section(SectionId::Memory.into(), reader.range(), input_wasm);
 
-                    for _ in 0..reader.get_count() {
-                        let ty = reader.read()?;
-                        info.memory_types.push(ty);
+                    for ty in reader {
+                        info.memory_types.push(ty?);
                     }
                 }
-                Payload::GlobalSection(mut reader) => {
+                Payload::GlobalSection(reader) => {
                     info.section(SectionId::Global.into(), reader.range(), input_wasm);
 
-                    for _ in 0..reader.get_count() {
-                        info.global_types.push(reader.read()?.ty);
+                    for ty in reader {
+                        info.global_types.push(ty?.ty);
                     }
                 }
-                Payload::ExportSection(mut reader) => {
-                    info.exports_count = reader.get_count();
+                Payload::ExportSection(reader) => {
+                    info.exports_count = reader.count();
+                    let range = reader.range();
 
-                    for _ in 0..reader.get_count() {
-                        let entry = reader.read()?;
+                    for entry in reader {
+                        let entry = entry?;
                         if let ExternalKind::Global = entry.kind {
                             info.exports_global_count += 1;
                         }
                         info.export_names.insert(entry.name.into());
                     }
 
-                    info.section(SectionId::Export.into(), reader.range(), input_wasm);
+                    info.section(SectionId::Export.into(), range, input_wasm);
                 }
                 Payload::StartSection { func, range } => {
                     info.start_function = Some(func);
                     info.section(SectionId::Start.into(), range, input_wasm);
                 }
                 Payload::ElementSection(reader) => {
-                    info.elements_count = reader.get_count();
+                    info.elements_count = reader.count();
                     info.section(SectionId::Element.into(), reader.range(), input_wasm);
                 }
                 Payload::DataSection(reader) => {
-                    info.data_segments_count = reader.get_count();
+                    info.data_segments_count = reader.count();
                     info.section(SectionId::Data.into(), reader.range(), input_wasm);
                 }
                 Payload::CustomSection(c) => {
@@ -446,14 +439,14 @@ impl ModuleInfo {
 pub fn copy_locals(
     func_body: &wasmparser::FunctionBody,
 ) -> Result<Vec<(u32, wasm_encoder::ValType)>> {
-    let mut local_reader = func_body.get_locals_reader()?;
     // Get current locals and map to encoder types
-    let current_locals: Vec<(u32, wasm_encoder::ValType)> = (0..local_reader.get_count())
-        .map(|_| {
-            let (count, ty) = local_reader.read().unwrap();
-            (count, DefaultTranslator.translate_ty(&ty).unwrap())
+    let current_locals = func_body
+        .get_locals_reader()?
+        .into_iter()
+        .map(|local| {
+            local.map(|(count, ty)| (count, DefaultTranslator.translate_val_ty(&ty).unwrap()))
         })
-        .collect::<Vec<(u32, wasm_encoder::ValType)>>();
+        .collect::<Result<_, _>>()?;
 
     Ok(current_locals)
 }

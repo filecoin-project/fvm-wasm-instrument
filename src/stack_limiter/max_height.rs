@@ -790,6 +790,15 @@ pub fn compute(func_idx: u32, module: &ModuleInfo) -> Result<u32> {
             ReturnCall { .. } | ReturnCallIndirect { .. } => {
                 return Err(anyhow!("exception instructions are not supported"));
             }
+
+            MemoryDiscard { .. }
+            | CallRef { .. }
+            | ReturnCallRef { .. }
+            | RefAsNonNull
+            | BrOnNull { .. }
+            | BrOnNonNull { .. } => {
+                return Err(anyhow!("unsupported instrution: {:?}", opcode));
+            }
         }
     }
 

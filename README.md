@@ -1,9 +1,9 @@
 # fvm-wasm-instrument
 
-This started as a [wasm-instrumet](https://github.com/paritytech/wasm-instrument) with some FVM specific changes, but has since been significantly refactored to move away from parity-wasm which reached EOL.
+This started as a [wasm-instrumet](https://github.com/paritytech/wasm-instrument) with some FVM specific changes but has since been significantly refactored to move away from parity-wasm which reached EOL.
 
 fvm-wasm-instrument is a Rust library containing a collection of WASM module instrumentations and
-transformations mainly useful for wasm based block chains and smart contracts.
+transformations are mainly useful for wasm based blockchains and smart contracts.
 
 ## Provided functionality
 

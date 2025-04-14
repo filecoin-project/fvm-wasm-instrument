@@ -593,17 +593,15 @@ pub fn inject<R: Rules>(raw_wasm: &[u8], rules: &R, gas_module_name: &str) -> Re
             let mut func_builder = wasm_encoder::Function::new(copy_locals(&func_body)?);
 
             // Go through instructions, increment all global gets
-            // todo this is wrong, can have imports at lower index??
             let mut operator_reader = func_body.get_operators_reader()?;
             while !operator_reader.eof() {
                 let op = operator_reader.read()?;
                 match op {
-                    // todo if > gas global??
                     Operator::GlobalGet { global_index } => {
-                        func_builder.instruction(&Instruction::GlobalGet(global_index + 1))
+                        func_builder.instruction(&Instruction::GlobalGet(if global_index >= gas_global {global_index + 1} else {global_index}))
                     }
                     Operator::GlobalSet { global_index } => {
-                        func_builder.instruction(&Instruction::GlobalSet(global_index + 1))
+                        func_builder.instruction(&Instruction::GlobalSet(if global_index >= gas_global {global_index + 1} else {global_index}))
                     }
                     op => func_builder.instruction(&DefaultTranslator.translate_op(&op)?),
                 };

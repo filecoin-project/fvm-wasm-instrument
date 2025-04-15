@@ -135,7 +135,7 @@ fn generate_stack_height_global(module: &mut ModuleInfo) -> Result<u32> {
     let mut global_sec_builder = GlobalSection::new();
     let index = if let Some(global_sec) = &module.raw_sections.get(&SectionId::Global.into()) {
         let reader = GlobalSectionReader::new(&global_sec.data, 0)?;
-        let count = reader.get_count();
+        let count = reader.count();
         for global in reader {
             DefaultTranslator.translate_global(global?, &mut global_sec_builder)?;
         }
